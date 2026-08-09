@@ -38,10 +38,50 @@ describe('schablonintakt rate', () => {
     expect(schablonRate(2021)).toBeCloseTo(0.0125, 10); // negative rate
   });
 
+  it('follows the rule in force that year, not just the rate', () => {
+    // Before 2016 the rate was the state loan rate itself, with no addition
+    // and no floor: 2015 was taxed at 0.90 %, giving the well-known 0.27 %.
+    expect(schablonRate(2015)).toBeCloseTo(0.009, 10);
+    expect(schablonRate(2015)! * 0.3).toBeCloseTo(0.0027, 10);
+    // 2016 and 2017 added 0.75 points, so 2017 landed on the floor: 0.375 %.
+    expect(schablonRate(2016)).toBeCloseTo(0.014, 10);
+    expect(schablonRate(2017)).toBeCloseTo(0.0125, 10);
+    expect(schablonRate(2017)! * 0.3).toBeCloseTo(0.00375, 10);
+    // 2018 moved to a full point: 0.49 + 1 = 1.49 %, giving 0.447 %.
+    expect(schablonRate(2018)).toBeCloseTo(0.0149, 10);
+  });
+
+  it('has no rate before ISK existed', () => {
+    expect(schablonRate(2012)).toBeCloseTo(0.0165, 10);
+    expect(schablonRate(2011)).toBeNull();
+  });
+
   it('is unknown for a year whose rate has not been published yet', () => {
     expect(schablonRate(2099)).toBeNull();
     expect(fribelopp(2099)).toBeNull();
-    expect(() => computeTaxYear(emptyYear(2099))).toThrow(/statslaneranta/);
+  });
+
+  it('still reports a depa year that has no ISK rate', () => {
+    const result = computeTaxYear({
+      ...emptyYear(2008),
+      events: [
+        { date: '2007-01-01', symbol: 'A', account: 'Broker', kind: 'ACQUIRE', quantity: 1, amountSek: 1_000 },
+        { date: '2008-02-01', symbol: 'A', account: 'Broker', kind: 'DISPOSE', quantity: 1, amountSek: 3_000 },
+      ],
+    });
+
+    expect(result.rateAvailable).toBe(false);
+    expect(result.depa.gains).toBeCloseTo(2_000, 6);
+    expect(result.tax).toBeCloseTo(600, 6);
+    // No ISK account was marked, so the missing rate is not worth mentioning.
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it('says so when an ISK account has no rate for its year', () => {
+    const result = computeTaxYear({ ...emptyYear(2011), isk: [isk('A', 100_000)] });
+
+    expect(result.isk.schablonintakt).toBe(0);
+    expect(result.warnings[0].category).toBe('No ISK rate for this year');
   });
 
   it('has no fribelopp before 2025', () => {

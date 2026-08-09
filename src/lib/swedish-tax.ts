@@ -19,6 +19,24 @@ export type Wrapper = 'ISK' | 'DEPA' | 'IGNORE';
  * publishes it in early December - add one line per year.
  */
 export const SLR_NOV_30: Record<number, number> = {
+  2000: 5.06,
+  2001: 4.94,
+  2002: 4.85,
+  2003: 4.71,
+  2004: 3.95,
+  2005: 3.26,
+  2006: 3.54,
+  2007: 4.16,
+  2008: 2.89,
+  2009: 3.2,
+  2010: 2.84,
+  2011: 1.65,
+  2012: 1.49,
+  2013: 2.09,
+  2014: 0.9,
+  2015: 0.65,
+  2016: 0.27,
+  2017: 0.49,
   2018: 0.51,
   2019: -0.09,
   2020: -0.1,
@@ -29,17 +47,28 @@ export const SLR_NOV_30: Record<number, number> = {
   2025: 2.55,
 };
 
+/** ISK exists from 1 January 2012; earlier years have no schablonintakt. */
+const ISK_FIRST_YEAR = 2012;
+
 /** Fribelopp: kapitalunderlaget is reduced by this before the rate applies. */
 const FRIBELOPP: Record<number, number> = {
   2025: 150_000,
   2026: 300_000,
 };
 
-/** Schablonintakt rate = SLR + 1 percentage point, never below 1.25 %. */
+/**
+ * The rate applied to the kapitalunderlag. The rule has changed twice since
+ * ISK was introduced, so an old year is not just an old number:
+ *
+ *   2012-2015  statslaneräntan as it stands, no addition and no floor
+ *   2016-2017  plus 0.75 percentage points, never below 1.25 %
+ *   2018-      plus 1.00 percentage points, never below 1.25 %
+ */
 export function schablonRate(year: number): number | null {
   const slr = SLR_NOV_30[year - 1];
-  if (slr === undefined) return null;
-  return Math.max(slr + 1, 1.25) / 100;
+  if (slr === undefined || year < ISK_FIRST_YEAR) return null;
+  if (year <= 2015) return slr / 100;
+  return Math.max(slr + (year <= 2017 ? 0.75 : 1), 1.25) / 100;
 }
 
 /**
@@ -133,6 +162,8 @@ export interface TaxYearInput {
 export interface TaxYearResult {
   year: number;
   rate: number;
+  /** False when no statslaneranta is on record - the ISK half reads 0. */
+  rateAvailable: boolean;
   fribelopp: number;
   isk: {
     accounts: IskAccountResult[];
@@ -162,9 +193,6 @@ export interface TaxYearResult {
   taxReduction: number;
   warnings: Warning[];
 }
-
-/** Thrown when a year has no rate configured - the caller shows it verbatim. */
-export class MissingRateError extends Error {}
 
 /** Relative tolerance on share counts, to absorb accumulated float error. */
 const QUANTITY_EPSILON = 1e-6;
@@ -298,17 +326,28 @@ export function computeDisposals(
 }
 
 export function computeTaxYear(input: TaxYearInput): TaxYearResult {
-  const rate = schablonRate(input.year);
-  const allowance = fribelopp(input.year);
-  if (rate === null || allowance === null) {
-    throw new MissingRateError(
-      `No statslaneranta on record for 30 November ${input.year - 1}, or no fribelopp ` +
-        `for ${input.year}. Add it to SLR_NOV_30 / FRIBELOPP in src/lib/swedish-tax.ts.`,
-    );
-  }
+  const configuredRate = schablonRate(input.year);
+  const configuredAllowance = fribelopp(input.year);
+  const rateAvailable = configuredRate !== null && configuredAllowance !== null;
+
+  const rate = configuredRate ?? 0;
+  const allowance = configuredAllowance ?? 0;
 
   const isk = computeIsk(input.isk, rate, allowance);
   const { rows, warnings } = computeDisposals(input.events, input.year);
+
+  // A year without a published rate is still a perfectly good depa year, so it
+  // is reported rather than refused - only the ISK half goes missing.
+  if (!rateAvailable && input.isk.length > 0) {
+    warnings.push({
+      category: 'No ISK rate for this year',
+      detail:
+        input.year < ISK_FIRST_YEAR
+          ? `ISK did not exist in ${input.year}, so no schablonintakt is calculated.`
+          : `No statslaneranta on record for 30 November ${input.year - 1}. Add it to ` +
+            `SLR_NOV_30 in src/lib/swedish-tax.ts; the ISK figures are 0 until then.`,
+    });
+  }
 
   const gains = rows.filter((r) => r.result > 0).reduce((s, r) => s + r.result, 0);
   const losses = rows.filter((r) => r.result < 0).reduce((s, r) => s - r.result, 0);
@@ -343,6 +382,7 @@ export function computeTaxYear(input: TaxYearInput): TaxYearResult {
   return {
     year: input.year,
     rate,
+    rateAvailable,
     fribelopp: allowance,
     isk: { ...isk, withholding: input.iskWithholdingSek },
     depa: {

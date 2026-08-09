@@ -9,7 +9,6 @@ import type {
 import { useMemo } from 'react';
 import {
   computeTaxYear,
-  MissingRateError,
   type IskAccount,
   type SecurityEvent,
   type TaxYearResult,
@@ -170,7 +169,6 @@ export function useTaxData(ctx: AddonContext) {
 
 export interface TaxYearView {
   result?: TaxYearResult;
-  error?: string;
   /** True while the year is still running - quarter starts are projected. */
   partial: boolean;
   baseCurrencyWarning?: string;
@@ -406,39 +404,34 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
     const sumInYear = (predicate: (a: ActivityDetails) => boolean) =>
       inYear.filter(predicate).reduce((sum, a) => sum + toSek(a), 0);
 
-    try {
-      const result = computeTaxYear({
-        year,
-        isk,
-        events,
-        dividendsSek: sumInYear((a) => depaIds.has(a.accountId) && a.activityType === 'DIVIDEND'),
-        interestSek: sumInYear((a) => depaIds.has(a.accountId) && a.activityType === 'INTEREST'),
-        iskWithholdingSek: sumInYear(
-          (a) => wrapperOf(a.accountId) === 'ISK' && a.activityType === 'TAX',
-        ),
-        depaFeesSek: sumInYear((a) => depaIds.has(a.accountId) && a.activityType === 'FEE'),
-      });
+    const result = computeTaxYear({
+      year,
+      isk,
+      events,
+      dividendsSek: sumInYear((a) => depaIds.has(a.accountId) && a.activityType === 'DIVIDEND'),
+      interestSek: sumInYear((a) => depaIds.has(a.accountId) && a.activityType === 'INTEREST'),
+      iskWithholdingSek: sumInYear(
+        (a) => wrapperOf(a.accountId) === 'ISK' && a.activityType === 'TAX',
+      ),
+      depaFeesSek: sumInYear((a) => depaIds.has(a.accountId) && a.activityType === 'FEE'),
+    });
 
-      const seen = new Set<string>();
-      const merged = [...result.warnings, ...warnings].filter((w) => {
-        const key = `${w.category}|${w.detail}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
+    const seen = new Set<string>();
+    const merged = [...result.warnings, ...warnings].filter((w) => {
+      const key = `${w.category}|${w.detail}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 
-      return {
-        result: { ...result, warnings: merged },
-        partial,
-        baseCurrencyWarning:
-          data.baseCurrency === 'SEK'
-            ? undefined
-            : `Your base currency is ${data.baseCurrency}. Swedish tax is assessed in SEK, so every ` +
-              `figure below is in ${data.baseCurrency} and will not match a declaration.`,
-      };
-    } catch (error) {
-      if (error instanceof MissingRateError) return { error: error.message, partial };
-      throw error;
-    }
+    return {
+      result: { ...result, warnings: merged },
+      partial,
+      baseCurrencyWarning:
+        data.baseCurrency === 'SEK'
+          ? undefined
+          : `Your base currency is ${data.baseCurrency}. Swedish tax is assessed in SEK, so every ` +
+            `figure below is in ${data.baseCurrency} and will not match a declaration.`,
+    };
   }, [data, year]);
 }

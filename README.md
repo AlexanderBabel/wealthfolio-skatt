@@ -19,9 +19,21 @@ produce the declaration: see [Not implemented](#not-implemented).
 
 ```
 kapitalunderlag  = (value 1 Jan + 1 Apr + 1 Jul + 1 Oct + insättningar during the year) / 4
-schablonintäkt   = (kapitalunderlag − fribelopp) × (statslåneräntan 30 Nov + 1 pp, min 1.25 %)
+schablonintäkt   = (kapitalunderlag − fribelopp) × rate
 tax              = 30 % of the capital surplus
 ```
+
+The rate follows the rule in force that year, which has changed twice since ISK was
+introduced in 2012 — an old year is not just an old number:
+
+| Tax year | Rate |
+|---|---|
+| 2012–2015 | statslåneräntan on 30 Nov, as it stands |
+| 2016–2017 | plus 0.75 percentage points, never below 1.25 % |
+| 2018– | plus 1.00 percentage points, never below 1.25 % |
+
+`SLR_NOV_30` carries the 30 November rate back to 2000, so depå years reach further back
+than ISK does.
 
 - Withdrawals never reduce the kapitalunderlag.
 - The fribelopp (150 000 kr in 2025, 300 000 kr from 2026) is one allowance per person. It is
@@ -85,8 +97,8 @@ export const SLR_NOV_30: Record<number, number> = {
 };
 ```
 
-Until that line exists, the addon refuses to show a figure for that year rather than guessing.
-The value is not fetched: Riksbank's API publishes the 5-year government bond yield, which is
+Until that line exists the ISK figures read 0 and say why; the depå side of the year is
+unaffected. The value is not fetched: Riksbank's API publishes the 5-year government bond yield, which is
 the input Riksgälden averages, **not** statslåneräntan itself — close enough to look right and
 wrong enough to matter.
 

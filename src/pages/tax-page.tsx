@@ -140,8 +140,8 @@ function IskTab({ result, currency }: { result: TaxYearResult; currency: string 
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
         The kapitalunderlag is the average of the four quarter-start values plus everything
-        deposited during the year — withdrawals do not reduce it. The rate is statslåneräntan on
-        30 November {result.year - 1} plus one percentage point, and 30 % of the resulting
+        deposited during the year — withdrawals do not reduce it. The rate is set from
+        statslåneräntan on 30 November {result.year - 1}, and 30 % of the resulting
         schablonintäkt is the tax.
       </p>
 
@@ -258,7 +258,7 @@ function DepaTab({ result, currency }: { result: TaxYearResult; currency: string
     ['Net', depa.netResult, depa.netResult < 0 ? 'counted at 70 %' : undefined],
     ['Dividends', depa.dividends, 'as imported — net of withholding tax'],
     ['Interest', depa.interest],
-    ['Fees', depa.fees, 'förvaltningsutgifter, not deductible'],
+    ['Fees', depa.fees, 'not deductible — förvaltningsutgifter'],
   ];
 
   return (
@@ -275,8 +275,8 @@ function DepaTab({ result, currency }: { result: TaxYearResult; currency: string
               <TableHead>Security</TableHead>
               <TableHead>Account</TableHead>
               <TableHead className="text-right">Quantity</TableHead>
-              <TableHead className="text-right">Försäljningspris</TableHead>
-              <TableHead className="text-right">Omkostnadsbelopp</TableHead>
+              <TableHead className="text-right">Proceeds</TableHead>
+              <TableHead className="text-right">Cost basis</TableHead>
               <TableHead className="text-right">Result</TableHead>
             </TableRow>
           </TableHeader>
@@ -315,6 +315,12 @@ function DepaTab({ result, currency }: { result: TaxYearResult; currency: string
           </TableBody>
         </Table>
       )}
+
+      {depa.rows.length > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          On the K4 these columns are försäljningspris, omkostnadsbelopp and vinst/förlust.
+        </p>
+      ) : null}
 
       <Separator />
 
@@ -487,11 +493,6 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
               </Button>
             </div>
           </div>
-        ) : view.error ? (
-          <Alert variant="destructive">
-            <AlertTitle>No rate configured for {selectedYear}</AlertTitle>
-            <AlertDescription>{view.error}</AlertDescription>
-          </Alert>
         ) : view.result ? (
           <div className="space-y-6">
             {view.partial ? (
@@ -544,7 +545,7 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
                 }
               />
               <Stat
-                label="Kapitalöverskott"
+                label="Capital surplus"
                 value={formatAmount(view.result.kapitalOverskott, currency)}
                 hint="schablonintäkt + depå result + dividends + interest"
               />
