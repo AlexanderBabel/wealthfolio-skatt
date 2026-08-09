@@ -285,6 +285,12 @@ function AccountsTab({
   const mutation = useMutation({
     mutationFn: (next: WrapperMap) => saveWrappers(ctx, next),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['skatt', 'data'] }),
+    onError: (error: unknown) =>
+      ctx.api.toast.error(
+        `Could not save the account classification: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      ),
   });
 
   return (
@@ -334,13 +340,19 @@ function AccountsTab({
 }
 
 export function TaxPage({ ctx }: { ctx: AddonContext }) {
-  const { data, isLoading } = useTaxData(ctx);
+  const { data, isLoading, error } = useTaxData(ctx);
   const [year, setYear] = useState<number | null>(null);
   const selectedYear = year ?? data?.years[0] ?? new Date().getFullYear();
   const view = useTaxYear(data, selectedYear);
   const currency = data?.baseCurrency ?? 'SEK';
 
   const payable = view.result ? view.result.tax > 0 : false;
+  // Nothing on this page means anything until at least one account has a
+  // wrapper, so that is the first and only thing shown until it is done.
+  const unclassified = !!data && !Object.values(data.wrappers).some((w) => w !== 'IGNORE');
+  const accountsTab = (
+    <AccountsTab ctx={ctx} wrappers={data?.wrappers ?? {}} accounts={data?.accounts ?? []} />
+  );
 
   return (
     <Page>
@@ -369,6 +381,28 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
       <PageContent>
         {isLoading ? (
           <p className="py-12 text-center text-sm text-muted-foreground">Loading…</p>
+        ) : error ? (
+          <div className="space-y-6">
+            <Alert variant="destructive">
+              <AlertTitle>Could not read your portfolio</AlertTitle>
+              <AlertDescription>
+                {error instanceof Error ? error.message : String(error)}
+              </AlertDescription>
+            </Alert>
+            {accountsTab}
+          </div>
+        ) : unclassified ? (
+          <div className="space-y-6">
+            <Alert>
+              <AlertTitle>Start by telling the addon which account is which</AlertTitle>
+              <AlertDescription>
+                Wealthfolio has no ISK account type, so it cannot know how each of your accounts
+                is taxed. Set a wrapper below — <strong>ISK</strong> for an investeringssparkonto,{' '}
+                <strong>Depå</strong> for an ordinary taxable account — and the tax year appears.
+              </AlertDescription>
+            </Alert>
+            {accountsTab}
+          </div>
         ) : view.error ? (
           <Alert variant="destructive">
             <AlertTitle>No rate configured for {selectedYear}</AlertTitle>
@@ -447,7 +481,7 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
                 <DepaTab result={view.result} currency={currency} />
               </TabsContent>
               <TabsContent value="accounts" className="pt-4">
-                <AccountsTab ctx={ctx} wrappers={data?.wrappers ?? {}} accounts={data?.accounts ?? []} />
+                {accountsTab}
               </TabsContent>
             </Tabs>
           </div>

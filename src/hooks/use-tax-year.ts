@@ -45,7 +45,23 @@ interface TaxData {
   years: number[];
 }
 
-const day = (d: Date | string) => String(d).slice(0, 10);
+const pad = (n: number) => String(n).padStart(2, '0');
+
+/**
+ * YYYY-MM-DD. Activity and valuation dates arrive as UTC midnight, so they are
+ * read in UTC; `today()` is the local calendar day, which is what a tax year
+ * means to the person reading the page.
+ */
+export const day = (d: Date | string): string => {
+  if (typeof d === 'string') return d.slice(0, 10);
+  const date = d instanceof Date ? d : new Date(d);
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+};
+
+const today = (): string => {
+  const now = new Date();
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+};
 const amountOf = (a: ActivityDetails) => Number(a.amount ?? 0) || 0;
 const quantityOf = (a: ActivityDetails) => Number(a.quantity ?? 0) || 0;
 
@@ -74,15 +90,22 @@ export function useTaxData(ctx: AddonContext) {
       const tracked = accounts.filter((a) => (wrappers[a.id] ?? 'IGNORE') !== 'IGNORE');
       const firstDate = activities.reduce(
         (min, a) => (day(a.date) < min ? day(a.date) : min),
-        day(new Date()),
+        today(),
       );
       const start = `${Number(firstDate.slice(0, 4)) - 1}-12-01`;
-      const end = day(new Date());
+      const end = today();
 
       const series: Record<string, Series> = {};
       await Promise.all(
         tracked.map(async (account) => {
-          const points = await ctx.api.portfolio.getHistoricalValuations(account.id, start, end);
+          // One account without valuations must not blank the whole page - the
+          // quarters simply come out unknown, which the year already reports.
+          const points = await ctx.api.portfolio
+            .getHistoricalValuations(account.id, start, end)
+            .catch((error: unknown) => {
+              ctx.api.logger.error(`No valuations for ${account.name}: ${String(error)}`);
+              return [] as AccountValuation[];
+            });
           series[account.id] = {
             points: [...points].sort((a, b) => day(a.valuationDate).localeCompare(day(b.valuationDate))),
             baseCurrency: points[0]?.baseCurrency ?? 'SEK',
@@ -126,8 +149,8 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
   return useMemo(() => {
     if (!data) return { partial: false };
 
-    const today = day(new Date());
-    const partial = String(year) === today.slice(0, 4);
+    const now = today();
+    const partial = String(year) === now.slice(0, 4);
     const warnings: string[] = [];
 
     const wrapperOf = (accountId: string): Wrapper => data.wrappers[accountId] ?? 'IGNORE';
@@ -212,7 +235,7 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
 
         const quarterValues = ['01-01', '04-01', '07-01', '10-01'].map((suffix, index) => {
           const date = `${year}-${suffix}`;
-          if (date > today) {
+          if (date > now) {
             // The quarter has not started. Carry the latest known value forward
             // so the year still produces a number, flagged as a projection.
             projectedQuarters.push(index);
