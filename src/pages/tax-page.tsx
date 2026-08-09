@@ -52,18 +52,27 @@ function Stat({
   value,
   hint,
   emphasis,
+  refund,
 }: {
   label: string;
   value: string;
   hint?: string;
   emphasis?: boolean;
+  refund?: boolean;
 }) {
   return (
-    <Card>
+    <Card className={refund ? 'border-success/40 bg-success/5' : undefined}>
       <CardHeader className="pb-2">
-        <CardDescription>{label}</CardDescription>
-        <CardTitle className={emphasis ? 'text-3xl tabular-nums' : 'text-2xl tabular-nums'}>
-          {value}
+        <CardDescription className="flex items-center gap-2">
+          {label}
+          {refund ? <Badge variant="success">back to you</Badge> : null}
+        </CardDescription>
+        <CardTitle
+          className={`tabular-nums ${emphasis ? 'text-3xl' : 'text-2xl'} ${
+            refund ? 'text-success' : ''
+          }`}
+        >
+          {refund ? `+ ${value}` : value}
         </CardTitle>
       </CardHeader>
       {hint ? (
@@ -504,23 +513,34 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
 
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <Stat
-                label={payable ? 'Estimated tax' : 'Estimated tax reduction'}
+                label={payable ? 'Estimated tax to pay' : 'Estimated tax reduction'}
                 value={formatAmount(payable ? view.result.tax : view.result.taxReduction, currency)}
-                hint={payable ? '30 % of the capital surplus' : 'from a capital deficit'}
-                emphasis
-              />
-              <Stat
-                label="Schablonintäkt (ISK)"
-                value={formatAmount(view.result.isk.schablonintakt, currency)}
-                hint={`${(view.result.rate * 100).toFixed(2)} % of the taxable kapitalunderlag`}
-              />
-              <Stat
-                label="Depå result"
-                value={formatAmount(view.result.depa.deductibleResult, currency)}
                 hint={
-                  view.result.depa.netResult < 0
-                    ? 'net loss, quoted to 70 %'
-                    : 'realised gains after offsetting losses'
+                  payable
+                    ? '30 % of the capital surplus'
+                    : 'the year is a capital deficit, so this comes off your tax instead'
+                }
+                emphasis
+                refund={!payable && view.result.taxReduction > 0}
+              />
+              <Stat
+                label={`Schablonintäkt at ${(view.result.rate * 100).toFixed(2)} %`}
+                value={formatAmount(view.result.isk.schablonintakt, currency)}
+                hint={`ISK, on a kapitalunderlag of ${formatAmount(
+                  view.result.isk.taxableUnderlag,
+                  currency,
+                )}`}
+              />
+              <Stat
+                label="Fribelopp used"
+                value={`${formatAmount(view.result.isk.fribeloppApplied, currency)} of ${formatAmount(
+                  view.result.fribelopp,
+                  currency,
+                )}`}
+                hint={
+                  view.result.fribelopp === 0
+                    ? `No allowance existed in ${view.result.year}`
+                    : `One allowance for ${view.result.year}, shared by every ISK`
                 }
               />
               <Stat

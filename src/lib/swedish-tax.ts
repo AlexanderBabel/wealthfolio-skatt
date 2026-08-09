@@ -86,13 +86,18 @@ export interface SecurityEvent {
   symbol: string;
   name?: string;
   account: string;
-  /** REMOVE takes shares out of the pool without a taxable disposal. */
-  kind: 'ACQUIRE' | 'DISPOSE' | 'REMOVE';
+  /**
+   * REMOVE takes shares out of the pool without a taxable disposal. REBOOK is a
+   * split or a broker re-issue: the share count changes, the cost does not.
+   */
+  kind: 'ACQUIRE' | 'DISPOSE' | 'REMOVE' | 'REBOOK';
   quantity: number;
+  /** REBOOK: how many shares the new `quantity` replaces. */
+  replacedQuantity?: number;
   /**
    * ACQUIRE: everything paid, courtage included (adds to omkostnadsbelopp).
    * DISPOSE: proceeds after courtage (forsaljningspris, 44 kap. 13 § IL).
-   * REMOVE: ignored.
+   * REMOVE and REBOOK: ignored.
    */
   amountSek: number;
 }
@@ -161,6 +166,9 @@ export interface TaxYearResult {
 /** Thrown when a year has no rate configured - the caller shows it verbatim. */
 export class MissingRateError extends Error {}
 
+/** Relative tolerance on share counts, to absorb accumulated float error. */
+const QUANTITY_EPSILON = 1e-6;
+
 function computeIsk(accounts: IskAccount[], rate: number, allowance: number) {
   const withUnderlag = accounts.map((a) => {
     const quarters = a.quarterValues.reduce<number>((sum, v) => sum + (v ?? 0), 0);
@@ -226,6 +234,15 @@ export function computeDisposals(
       continue;
     }
 
+    if (e.kind === 'REBOOK') {
+      // Whatever came out is replaced by what went in, at the same cost.
+      held.set(e.symbol, {
+        quantity: pos.quantity - (e.replacedQuantity ?? 0) + e.quantity,
+        cost: pos.cost,
+      });
+      continue;
+    }
+
     const schablonOmkostnad = e.amountSek * 0.2;
     let omkostnadsbelopp: number;
     let note: string | undefined;
@@ -241,7 +258,10 @@ export function computeDisposals(
       });
     } else {
       const quantity = Math.min(e.quantity, pos.quantity);
-      if (quantity < e.quantity) {
+      // Share counts accumulate float error over years of fractional trades, so
+      // "2 against 1.9999999999999998" is the same holding, not an overdraft.
+      const overdraft = e.quantity - pos.quantity;
+      if (overdraft > Math.max(QUANTITY_EPSILON, pos.quantity * QUANTITY_EPSILON)) {
         note = 'sold more than the recorded holding';
         warnings.push({
           category: 'Sales larger than the recorded holding',

@@ -162,6 +162,45 @@ describe('genomsnittsmetoden', () => {
     expect(warnings[0].detail).toContain('Broker');
   });
 
+  it('carries the cost basis through a share split', () => {
+    // 0.044 shares at 1766 leave and 0.886 at 88 arrive: a 20:1 split, booked
+    // as a transfer out and a transfer in of the same security.
+    const { rows } = computeDisposals(
+      [
+        buy('2021-01-10', 0.04429131, 1000),
+        {
+          ...buy('2022-07-18', 0.8858262, 0),
+          kind: 'REBOOK',
+          replacedQuantity: 0.04429131,
+        },
+        sell('2026-03-01', 0.8858262, 1500),
+      ],
+      2026,
+    );
+
+    expect(rows[0].omkostnadsbelopp).toBeCloseTo(1000, 6);
+    expect(rows[0].result).toBeCloseTo(500, 6);
+  });
+
+  it('does not call a rounded-off share count an overdraft', () => {
+    const { rows, warnings } = computeDisposals(
+      [buy('2025-01-10', 1.9999999999999998, 1000), sell('2026-01-10', 2, 1200)],
+      2026,
+    );
+
+    expect(warnings).toHaveLength(0);
+    expect(rows[0].omkostnadsbelopp).toBeCloseTo(1000, 6);
+  });
+
+  it('still reports a genuine overdraft', () => {
+    const { warnings } = computeDisposals(
+      [buy('2025-01-10', 2, 1000), sell('2026-01-10', 5, 1200)],
+      2026,
+    );
+
+    expect(warnings[0].category).toBe('Sales larger than the recorded holding');
+  });
+
   it('takes transferred-out shares off the pool without calling it a sale', () => {
     const { rows } = computeDisposals(
       [

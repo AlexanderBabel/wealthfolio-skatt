@@ -80,6 +80,17 @@
         }
       ],
       "purpose": "Convert amounts in a currency the account itself does not use into SEK."
+    },
+    {
+      "category": "quotes",
+      "functions": [
+        {
+          "name": "getHistory",
+          "isDeclared": true,
+          "isDetected": false
+        }
+      ],
+      "purpose": "Read the daily exchange-rate history so a trade is converted at the rate on its own date."
     }
   ],
   "keywords": [

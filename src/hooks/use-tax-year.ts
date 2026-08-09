@@ -1,5 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
-import type { Account, AccountValuation, ActivityDetails, AddonContext } from '@wealthfolio/addon-sdk';
+import type {
+  Account,
+  AccountValuation,
+  ActivityDetails,
+  AddonContext,
+  Quote,
+} from '@wealthfolio/addon-sdk';
 import { useMemo } from 'react';
 import {
   computeTaxYear,
@@ -36,33 +42,38 @@ interface Series {
   baseCurrency: string;
 }
 
+interface RatePoint {
+  date: string;
+  /** Foreign currency to base currency on that date. */
+  rate: number;
+}
+
 interface TaxData {
   accounts: Account[];
   wrappers: WrapperMap;
   activities: ActivityDetails[];
   series: Record<string, Series>;
   baseCurrency: string;
-  rates: Record<string, number>;
+  /** Daily rate history to base currency, keyed by the foreign currency. */
+  rates: Record<string, RatePoint[]>;
   years: number[];
 }
 
 const pad = (n: number) => String(n).padStart(2, '0');
 
 /**
- * YYYY-MM-DD. Activity and valuation dates arrive as UTC midnight, so they are
- * read in UTC; `today()` is the local calendar day, which is what a tax year
- * means to the person reading the page.
+ * YYYY-MM-DD in the local calendar, which is the one a Swedish tax year is
+ * counted in. Timestamps come back as the instant of local midnight, so a
+ * trade on 18 July is stored as `2022-07-17T22:00:00Z` in summer - reading
+ * that in UTC would file it a day early, and on 1 January, a year early.
  */
 export const day = (d: Date | string): string => {
-  if (typeof d === 'string') return d.slice(0, 10);
-  const date = d instanceof Date ? d : new Date(d);
-  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+  if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  const date = typeof d === 'string' ? new Date(d) : d;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 };
 
-const today = (): string => {
-  const now = new Date();
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-};
+const today = (): string => day(new Date());
 const amountOf = (a: ActivityDetails) => Number(a.amount ?? 0) || 0;
 const quantityOf = (a: ActivityDetails) => Number(a.quantity ?? 0) || 0;
 
@@ -114,11 +125,30 @@ export function useTaxData(ctx: AddonContext) {
         }),
       );
 
-      const rates: Record<string, number> = {};
-      for (const r of exchangeRates) {
-        if (r.toCurrency === 'SEK') rates[r.fromCurrency] = r.rate;
-        else if (r.fromCurrency === 'SEK' && r.rate) rates[r.toCurrency] = 1 / r.rate;
-      }
+      const base = Object.values(series)[0]?.baseCurrency ?? 'SEK';
+
+      // An exchange rate's id is the asset its quotes are stored under, so the
+      // quote history of that asset is the daily rate series. That is what a
+      // 2019 trade has to be converted with - not today's rate.
+      const rates: Record<string, RatePoint[]> = {};
+      await Promise.all(
+        exchangeRates
+          .filter((r) => r.toCurrency === base || r.fromCurrency === base)
+          .map(async (r) => {
+            const foreign = r.toCurrency === base ? r.fromCurrency : r.toCurrency;
+            const invert = r.fromCurrency === base;
+            const history = await ctx.api.quotes.getHistory(r.id).catch(() => [] as Quote[]);
+
+            const points: RatePoint[] = history
+              .filter((q) => q.close > 0)
+              .map((q) => ({ date: day(q.timestamp), rate: invert ? 1 / q.close : q.close }))
+              .sort((a, b) => a.date.localeCompare(b.date));
+
+            // The current rate closes the gap between the last quote and today.
+            if (r.rate > 0) points.push({ date: today(), rate: invert ? 1 / r.rate : r.rate });
+            if (points.length > 0) rates[foreign] = points;
+          }),
+      );
 
       const thisYear = new Date().getFullYear();
       const firstYear = Number(firstDate.slice(0, 4));
@@ -130,7 +160,7 @@ export function useTaxData(ctx: AddonContext) {
         wrappers,
         activities,
         series,
-        baseCurrency: Object.values(series)[0]?.baseCurrency ?? 'SEK',
+        baseCurrency: base,
         rates,
         years: years.length > 0 ? years : [thisYear],
       };
@@ -156,36 +186,32 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
     const warn = (category: string, detail: string) => warnings.push({ category, detail });
 
     const wrapperOf = (accountId: string): Wrapper => data.wrappers[accountId] ?? 'IGNORE';
-    const byId = new Map(data.accounts.map((a) => [a.id, a]));
 
-    /**
-     * Amounts are converted with the account's own daily rate to base currency,
-     * which the valuation series carries. An activity in some third currency
-     * falls back to today's rate, which is wrong for old rows - hence a warning.
-     */
+    /** The rate on `date`, or the closest earlier one the history holds. */
+    const rateOn = (currency: string, date: string): number | undefined => {
+      // GBp / GBX is pence, a hundredth of the GBP the history is kept in.
+      const pence = currency === 'GBp' || currency === 'GBX';
+      const points = data.rates[pence ? 'GBP' : currency];
+      if (!points?.length) return undefined;
+
+      let found = points[0];
+      for (const point of points) {
+        if (point.date > date) break;
+        found = point;
+      }
+      return pence ? found.rate / 100 : found.rate;
+    };
+
     const toSek = (activity: ActivityDetails): number => {
       const value = amountOf(activity);
       if (activity.currency === data.baseCurrency) return value;
 
-      const account = byId.get(activity.accountId);
-      if (account && activity.currency === account.currency) {
-        const point = valuationAt(data.series[activity.accountId], day(activity.date));
-        if (point?.fxRateToBase) return value * point.fxRateToBase;
-      }
+      const rate = rateOn(activity.currency, day(activity.date));
+      if (rate !== undefined) return value * rate;
 
-      // GBp / GBX is pence, a hundredth of the GBP the rate table knows about.
-      const pence = activity.currency === 'GBp' || activity.currency === 'GBX';
-      const rate = pence ? data.rates.GBP / 100 : data.rates[activity.currency];
-      if (rate) {
-        warn(
-          'Converted at a current rate',
-          `${activity.currency} amounts use today's rate, not the rate on the transaction date.`,
-        );
-        return value * rate;
-      }
       warn(
         'Missing exchange rate',
-        `No ${activity.currency} to ${data.baseCurrency} rate. Those amounts are counted unconverted.`,
+        `No ${activity.currency} to ${data.baseCurrency} history. Those amounts are counted unconverted.`,
       );
       return value;
     };
@@ -233,7 +259,6 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
           other.id !== activity.id &&
           other.activityType === opposite &&
           other.accountId !== activity.accountId &&
-          wrapperOf(other.accountId) !== 'IGNORE' &&
           other.assetSymbol === activity.assetSymbol &&
           Math.abs(quantityOf(other) - quantityOf(activity)) < 1e-9 &&
           Math.abs(new Date(`${day(other.date)}T00:00:00Z`).getTime() - when) <= 7 * DAYS,
@@ -243,6 +268,25 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
     const landsIn = (activity: ActivityDetails): Wrapper | undefined => {
       const other = counterpart(activity);
       return other ? wrapperOf(other.accountId) : undefined;
+    };
+
+    /**
+     * A share split or a broker re-booking arrives as a transfer out and a
+     * transfer in of the same security in the same account: 0.044 shares leave
+     * at 1766 and 0.886 arrive at 88. Nothing was disposed of - the cost basis
+     * carries over and only the share count changes.
+     */
+    const rebookedWith = (activity: ActivityDetails): ActivityDetails | undefined => {
+      const opposite = activity.activityType === 'TRANSFER_IN' ? 'TRANSFER_OUT' : 'TRANSFER_IN';
+      const when = new Date(`${day(activity.date)}T00:00:00Z`).getTime();
+      return data.activities.find(
+        (other) =>
+          other.id !== activity.id &&
+          other.activityType === opposite &&
+          other.accountId === activity.accountId &&
+          other.assetSymbol === activity.assetSymbol &&
+          Math.abs(new Date(`${day(other.date)}T00:00:00Z`).getTime() - when) <= 5 * DAYS,
+      );
     };
 
     const isk: IskAccount[] = data.accounts
@@ -310,7 +354,18 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
         case 'SELL':
           events.push({ ...base, kind: 'DISPOSE', quantity: quantityOf(a), amountSek: toSek(a) - feeSek });
           break;
-        case 'TRANSFER_IN':
+        case 'TRANSFER_IN': {
+          const rebooked = rebookedWith(a);
+          if (rebooked) {
+            events.push({
+              ...base,
+              kind: 'REBOOK',
+              quantity: quantityOf(a),
+              replacedQuantity: quantityOf(rebooked),
+              amountSek: 0,
+            });
+            break;
+          }
           // A transfer is never a purchase. Between two depa accounts the
           // pooled average cost already carries across, so the leg is dropped;
           // from outside, the row's own value is the only basis available.
@@ -318,7 +373,11 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
             events.push({ ...base, kind: 'ACQUIRE', quantity: quantityOf(a), amountSek: toSek(a) });
           }
           break;
+        }
         case 'TRANSFER_OUT': {
+          // The matching leg of a re-booking carries it; nothing to do here.
+          if (rebookedWith(a)) break;
+
           // Only a move into an ISK is a disposal - the shares leave the taxable
           // wrapper at market value. Anything else just leaves the pool.
           const destination = landsIn(a);
@@ -327,9 +386,10 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
           } else if (destination !== 'DEPA') {
             events.push({ ...base, kind: 'REMOVE', quantity: quantityOf(a), amountSek: 0 });
             warn(
-              'Transfers out with no matching account',
-              `${a.accountName}: ${a.assetSymbol} left on ${day(a.date)} with no matching transfer ` +
-                `in. Removed from the holding, not counted as a sale.`,
+              'Transfers out that went nowhere traceable',
+              `${a.accountName}: ${a.assetSymbol} left on ${day(a.date)} and arrived in ` +
+                `${destination === 'IGNORE' ? 'an account that is not tracked here' : 'no tracked account'}. ` +
+                `Removed from the holding, not counted as a sale.`,
             );
           }
           break;
