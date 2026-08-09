@@ -5,6 +5,7 @@ import {
   AlertDescription,
   AlertTitle,
   Badge,
+  Button,
   Card,
   CardContent,
   CardDescription,
@@ -32,9 +33,9 @@ import {
   TabsTrigger,
   formatAmount,
 } from '@wealthfolio/ui';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { saveWrappers, useTaxData, useTaxYear, type WrapperMap } from '../hooks/use-tax-year';
-import type { K4Row, TaxYearResult, Wrapper } from '../lib/swedish-tax';
+import type { K4Row, TaxYearResult, Warning, Wrapper } from '../lib/swedish-tax';
 
 const WRAPPER_LABELS: Record<Wrapper, string> = {
   ISK: 'ISK',
@@ -72,6 +73,41 @@ function Stat({
   );
 }
 
+/**
+ * A year can raise a hundred warnings and they are nearly all the same handful
+ * of things repeated, so only the categories are shown until asked.
+ */
+function Warnings({ warnings }: { warnings: Warning[] }) {
+  if (warnings.length === 0) return null;
+
+  const groups = new Map<string, string[]>();
+  for (const warning of warnings) {
+    groups.set(warning.category, [...(groups.get(warning.category) ?? []), warning.detail]);
+  }
+
+  return (
+    <Alert variant="warning">
+      <AlertTitle>Worth checking</AlertTitle>
+      <AlertDescription>
+        <div className="space-y-1">
+          {[...groups].map(([category, details]) => (
+            <details key={category}>
+              <summary className="cursor-pointer">
+                {category} <span className="text-muted-foreground">({details.length})</span>
+              </summary>
+              <ul className="list-disc space-y-1 py-1 pl-6 text-muted-foreground">
+                {details.map((detail) => (
+                  <li key={detail}>{detail}</li>
+                ))}
+              </ul>
+            </details>
+          ))}
+        </div>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 function IskTab({ result, currency }: { result: TaxYearResult; currency: string }) {
   const quarters = ['1 Jan', '1 Apr', '1 Jul', '1 Oct'];
 
@@ -83,14 +119,40 @@ function IskTab({ result, currency }: { result: TaxYearResult; currency: string 
     );
   }
 
+  const steps: Array<[string, string]> = [
+    ['Kapitalunderlag', formatAmount(result.isk.kapitalunderlag, currency)],
+    ['Fribelopp', `− ${formatAmount(result.isk.fribeloppApplied, currency)}`],
+    ['Taxed on', formatAmount(result.isk.taxableUnderlag, currency)],
+    ['Rate', `× ${(result.rate * 100).toFixed(2)} %`],
+    ['Schablonintäkt', formatAmount(result.isk.schablonintakt, currency)],
+  ];
+
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Kapitalunderlaget is the average of the four quarter-start values and everything deposited
-        during the year — withdrawals do not reduce it. It is taxed at{' '}
-        {(result.rate * 100).toFixed(2)} % (statslåneräntan on 30 Nov {result.year - 1} plus one
-        point), and 30 % of that is the tax.
+        The kapitalunderlag is the average of the four quarter-start values plus everything
+        deposited during the year — withdrawals do not reduce it. The rate is statslåneräntan on
+        30 November {result.year - 1} plus one percentage point, and 30 % of the resulting
+        schablonintäkt is the tax.
       </p>
+
+      <div className="flex flex-wrap items-end gap-x-8 gap-y-3 rounded-lg border p-4">
+        {steps.map(([label, value], index) => (
+          <div key={label} className={index === steps.length - 1 ? 'font-medium' : undefined}>
+            <div className="text-xs text-muted-foreground">{label}</div>
+            <div className="text-lg tabular-nums">{value}</div>
+          </div>
+        ))}
+        <p className="w-full text-xs text-muted-foreground">
+          The fribelopp for {result.year} is {formatAmount(result.fribelopp, currency)} — one
+          allowance for all your ISK accounts together, split below in proportion to each
+          account&apos;s kapitalunderlag.
+          {result.fribelopp > result.isk.kapitalunderlag
+            ? ' Your combined underlag is smaller than the allowance, so none of it is taxed.'
+            : null}
+        </p>
+      </div>
+
       <Table>
         <TableHeader>
           <TableRow>
@@ -100,7 +162,7 @@ function IskTab({ result, currency }: { result: TaxYearResult; currency: string 
                 {q}
               </TableHead>
             ))}
-            <TableHead className="text-right">Insättningar</TableHead>
+            <TableHead className="text-right">Deposits</TableHead>
             <TableHead className="text-right">Kapitalunderlag</TableHead>
             <TableHead className="text-right">Fribelopp</TableHead>
             <TableHead className="text-right">Schablonintäkt</TableHead>
@@ -154,7 +216,7 @@ function IskTab({ result, currency }: { result: TaxYearResult; currency: string 
               <Money value={result.isk.kapitalunderlag} currency={currency} />
             </TableCell>
             <TableCell className="text-right">
-              −<Money value={Math.min(result.fribelopp, result.isk.kapitalunderlag)} currency={currency} />
+              −<Money value={result.isk.fribeloppApplied} currency={currency} />
             </TableCell>
             <TableCell className="text-right">
               <Money value={result.isk.schablonintakt} currency={currency} />
@@ -182,12 +244,12 @@ function DepaTab({ result, currency }: { result: TaxYearResult; currency: string
   const schablonWins = depa.rows.filter((r) => r.schablonBetter);
 
   const summary: Array<[string, number, string?]> = [
-    ['Vinster', depa.gains],
-    ['Förluster', -depa.losses],
-    ['Netto', depa.netResult, depa.netResult < 0 ? 'quoted to 70 % below' : undefined],
-    ['Utdelningar', depa.dividends, 'as imported — net of withholding tax'],
-    ['Ränta', depa.interest],
-    ['Avgifter', depa.fees, 'förvaltningsutgifter, not deductible'],
+    ['Gains', depa.gains],
+    ['Losses', -depa.losses],
+    ['Net', depa.netResult, depa.netResult < 0 ? 'counted at 70 %' : undefined],
+    ['Dividends', depa.dividends, 'as imported — net of withholding tax'],
+    ['Interest', depa.interest],
+    ['Fees', depa.fees, 'förvaltningsutgifter, not deductible'],
   ];
 
   return (
@@ -202,10 +264,11 @@ function DepaTab({ result, currency }: { result: TaxYearResult; currency: string
             <TableRow>
               <TableHead>Date</TableHead>
               <TableHead>Security</TableHead>
-              <TableHead className="text-right">Antal</TableHead>
+              <TableHead>Account</TableHead>
+              <TableHead className="text-right">Quantity</TableHead>
               <TableHead className="text-right">Försäljningspris</TableHead>
               <TableHead className="text-right">Omkostnadsbelopp</TableHead>
-              <TableHead className="text-right">Resultat</TableHead>
+              <TableHead className="text-right">Result</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -225,6 +288,7 @@ function DepaTab({ result, currency }: { result: TaxYearResult; currency: string
                     </Badge>
                   ) : null}
                 </TableCell>
+                <TableCell className="text-muted-foreground">{row.account}</TableCell>
                 <TableCell className="text-right tabular-nums">{row.quantity}</TableCell>
                 <TableCell className="text-right">
                   <Money value={row.forsaljningspris} currency={currency} />
@@ -347,9 +411,14 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
   const currency = data?.baseCurrency ?? 'SEK';
 
   const payable = view.result ? view.result.tax > 0 : false;
-  // Nothing on this page means anything until at least one account has a
-  // wrapper, so that is the first and only thing shown until it is done.
-  const unclassified = !!data && !Object.values(data.wrappers).some((w) => w !== 'IGNORE');
+  // Nothing on this page means anything until the accounts are classified, so
+  // that is the first thing shown. Setting one account must not throw you out
+  // of the screen mid-way, so leaving is an explicit click.
+  const noneClassified = !!data && !Object.values(data.wrappers).some((w) => w !== 'IGNORE');
+  const [dismissed, setDismissed] = useState(false);
+  const startedEmpty = useRef(false);
+  if (noneClassified) startedEmpty.current = true;
+  const showOnboarding = !dismissed && (noneClassified || startedEmpty.current);
   const accountsTab = (
     <AccountsTab ctx={ctx} wrappers={data?.wrappers ?? {}} accounts={data?.accounts ?? []} />
   );
@@ -391,17 +460,23 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
             </Alert>
             {accountsTab}
           </div>
-        ) : unclassified ? (
+        ) : showOnboarding ? (
           <div className="space-y-6">
             <Alert>
               <AlertTitle>Start by telling the addon which account is which</AlertTitle>
               <AlertDescription>
                 Wealthfolio has no ISK account type, so it cannot know how each of your accounts
-                is taxed. Set a wrapper below — <strong>ISK</strong> for an investeringssparkonto,{' '}
-                <strong>Depå</strong> for an ordinary taxable account — and the tax year appears.
+                is taxed. Set a wrapper for every account — <strong>ISK</strong> for an
+                investeringssparkonto, <strong>Depå</strong> for an ordinary taxable account — then
+                continue.
               </AlertDescription>
             </Alert>
             {accountsTab}
+            <div className="flex justify-end">
+              <Button onClick={() => setDismissed(true)} disabled={noneClassified}>
+                Continue to {selectedYear}
+              </Button>
+            </div>
           </div>
         ) : view.error ? (
           <Alert variant="destructive">
@@ -455,18 +530,7 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
               />
             </div>
 
-            {view.result.warnings.length > 0 ? (
-              <Alert variant="warning">
-                <AlertTitle>{view.result.warnings.length} thing(s) worth checking</AlertTitle>
-                <AlertDescription>
-                  <ul className="list-disc space-y-1 pl-4">
-                    {view.result.warnings.map((warning) => (
-                      <li key={warning}>{warning}</li>
-                    ))}
-                  </ul>
-                </AlertDescription>
-              </Alert>
-            ) : null}
+            <Warnings warnings={view.result.warnings} />
 
             <Tabs defaultValue="isk">
               <TabsList>

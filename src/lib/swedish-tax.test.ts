@@ -95,6 +95,7 @@ describe('genomsnittsmetoden', () => {
   const buy = (date: string, quantity: number, amountSek: number): SecurityEvent => ({
     date,
     symbol: 'AAA',
+    account: 'Broker',
     kind: 'ACQUIRE',
     quantity,
     amountSek,
@@ -102,6 +103,7 @@ describe('genomsnittsmetoden', () => {
   const sell = (date: string, quantity: number, amountSek: number): SecurityEvent => ({
     date,
     symbol: 'AAA',
+    account: 'Broker',
     kind: 'DISPOSE',
     quantity,
     amountSek,
@@ -156,7 +158,23 @@ describe('genomsnittsmetoden', () => {
     const { rows, warnings } = computeDisposals([sell('2026-01-01', 10, 1000)], 2026);
 
     expect(rows[0].omkostnadsbelopp).toBeCloseTo(200, 6);
-    expect(warnings[0]).toMatch(/no recorded purchase/);
+    expect(warnings[0].category).toBe('Sales with no purchase on record');
+    expect(warnings[0].detail).toContain('Broker');
+  });
+
+  it('takes transferred-out shares off the pool without calling it a sale', () => {
+    const { rows } = computeDisposals(
+      [
+        buy('2025-01-10', 10, 1000),
+        { ...sell('2026-03-01', 6, 0), kind: 'REMOVE' },
+        sell('2026-06-01', 4, 800),
+      ],
+      2026,
+    );
+
+    // Only the real sale is reported, and it still costs 100 a share.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].omkostnadsbelopp).toBeCloseTo(400, 6);
   });
 });
 
@@ -165,10 +183,10 @@ describe('capital income', () => {
     const result = computeTaxYear({
       ...emptyYear(2026),
       events: [
-        { date: '2025-01-01', symbol: 'A', kind: 'ACQUIRE', quantity: 1, amountSek: 20_000 },
-        { date: '2026-02-01', symbol: 'A', kind: 'DISPOSE', quantity: 1, amountSek: 10_000 },
-        { date: '2025-01-01', symbol: 'B', kind: 'ACQUIRE', quantity: 1, amountSek: 1_000 },
-        { date: '2026-02-01', symbol: 'B', kind: 'DISPOSE', quantity: 1, amountSek: 5_000 },
+        { date: '2025-01-01', symbol: 'A', account: 'Broker', kind: 'ACQUIRE', quantity: 1, amountSek: 20_000 },
+        { date: '2026-02-01', symbol: 'A', account: 'Broker', kind: 'DISPOSE', quantity: 1, amountSek: 10_000 },
+        { date: '2025-01-01', symbol: 'B', account: 'Broker', kind: 'ACQUIRE', quantity: 1, amountSek: 1_000 },
+        { date: '2026-02-01', symbol: 'B', account: 'Broker', kind: 'DISPOSE', quantity: 1, amountSek: 5_000 },
       ],
     });
 
@@ -183,8 +201,8 @@ describe('capital income', () => {
       ...emptyYear(2024),
       isk: [isk('A', 1_000_000)],
       events: [
-        { date: '2023-01-01', symbol: 'A', kind: 'ACQUIRE', quantity: 1, amountSek: 30_000 },
-        { date: '2024-02-01', symbol: 'A', kind: 'DISPOSE', quantity: 1, amountSek: 20_000 },
+        { date: '2023-01-01', symbol: 'A', account: 'Broker', kind: 'ACQUIRE', quantity: 1, amountSek: 30_000 },
+        { date: '2024-02-01', symbol: 'A', account: 'Broker', kind: 'DISPOSE', quantity: 1, amountSek: 20_000 },
       ],
     });
     const withoutLoss = computeTaxYear({ ...emptyYear(2024), isk: [isk('A', 1_000_000)] });
@@ -197,8 +215,8 @@ describe('capital income', () => {
     const result = computeTaxYear({
       ...emptyYear(2024),
       events: [
-        { date: '2023-01-01', symbol: 'A', kind: 'ACQUIRE', quantity: 1, amountSek: 300_000 },
-        { date: '2024-02-01', symbol: 'A', kind: 'DISPOSE', quantity: 1, amountSek: 100_000 },
+        { date: '2023-01-01', symbol: 'A', account: 'Broker', kind: 'ACQUIRE', quantity: 1, amountSek: 300_000 },
+        { date: '2024-02-01', symbol: 'A', account: 'Broker', kind: 'DISPOSE', quantity: 1, amountSek: 100_000 },
       ],
     });
 

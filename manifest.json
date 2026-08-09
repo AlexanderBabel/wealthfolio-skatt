@@ -9,14 +9,18 @@
   "minWealthfolioVersion": "3.6.2",
   "enabled": true,
   "contributes": {
-    "routes": [{ "id": "wealthfolio-addon-skatt" }],
+    "routes": [
+      {
+        "id": "wealthfolio-addon-skatt"
+      }
+    ],
     "links": {
       "sidebar": [
         {
           "id": "wealthfolio-addon-skatt",
           "route": "wealthfolio-addon-skatt",
           "label": "Skatt",
-          "icon": "receipt",
+          "icon": "scales",
           "order": 100
         }
       ]
@@ -35,27 +39,56 @@
   "permissions": [
     {
       "category": "accounts",
-      "functions": [{ "name": "getAll", "isDeclared": true, "isDetected": false }],
+      "functions": [
+        {
+          "name": "getAll",
+          "isDeclared": true,
+          "isDetected": false
+        }
+      ],
       "purpose": "List accounts so each one can be classified as ISK, depå or untaxed."
     },
     {
       "category": "portfolio",
       "functions": [
-        { "name": "getHistoricalValuations", "isDeclared": true, "isDetected": false }
+        {
+          "name": "getHistoricalValuations",
+          "isDeclared": true,
+          "isDetected": false
+        }
       ],
       "purpose": "Read the account value at each quarter start, which is what the ISK kapitalunderlag is built from."
     },
     {
       "category": "activities",
-      "functions": [{ "name": "getAll", "isDeclared": true, "isDetected": false }],
+      "functions": [
+        {
+          "name": "getAll",
+          "isDeclared": true,
+          "isDetected": false
+        }
+      ],
       "purpose": "Read deposits, trades, dividends and interest to compute the taxable amounts."
     },
     {
       "category": "currency",
-      "functions": [{ "name": "getAll", "isDeclared": true, "isDetected": false }],
+      "functions": [
+        {
+          "name": "getAll",
+          "isDeclared": true,
+          "isDetected": false
+        }
+      ],
       "purpose": "Convert amounts in a currency the account itself does not use into SEK."
     }
   ],
-  "keywords": ["wealthfolio", "addon", "tax", "sweden", "isk", "skatt"],
+  "keywords": [
+    "wealthfolio",
+    "addon",
+    "tax",
+    "sweden",
+    "isk",
+    "skatt"
+  ],
   "license": "MIT"
 }

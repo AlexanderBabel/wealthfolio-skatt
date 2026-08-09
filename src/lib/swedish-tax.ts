@@ -71,16 +71,28 @@ export interface IskAccountResult extends IskAccount {
   unknownQuarters: number[];
 }
 
+/**
+ * A warning carries its category so the page can group a hundred of them into
+ * a handful of lines instead of an unreadable list.
+ */
+export interface Warning {
+  category: string;
+  detail: string;
+}
+
 export interface SecurityEvent {
   /** YYYY-MM-DD */
   date: string;
   symbol: string;
   name?: string;
-  kind: 'ACQUIRE' | 'DISPOSE';
+  account: string;
+  /** REMOVE takes shares out of the pool without a taxable disposal. */
+  kind: 'ACQUIRE' | 'DISPOSE' | 'REMOVE';
   quantity: number;
   /**
    * ACQUIRE: everything paid, courtage included (adds to omkostnadsbelopp).
    * DISPOSE: proceeds after courtage (forsaljningspris, 44 kap. 13 § IL).
+   * REMOVE: ignored.
    */
   amountSek: number;
 }
@@ -89,6 +101,7 @@ export interface K4Row {
   date: string;
   symbol: string;
   name?: string;
+  account: string;
   quantity: number;
   forsaljningspris: number;
   omkostnadsbelopp: number;
@@ -119,6 +132,9 @@ export interface TaxYearResult {
   isk: {
     accounts: IskAccountResult[];
     kapitalunderlag: number;
+    /** The part of the fribelopp actually used - never more than the underlag. */
+    fribeloppApplied: number;
+    taxableUnderlag: number;
     schablonintakt: number;
     withholding: number;
   };
@@ -139,7 +155,7 @@ export interface TaxYearResult {
   tax: number;
   /** Skattereduktion, SEK. Zero when the year is a surplus. */
   taxReduction: number;
-  warnings: string[];
+  warnings: Warning[];
 }
 
 /** Thrown when a year has no rate configured - the caller shows it verbatim. */
@@ -174,6 +190,8 @@ function computeIsk(accounts: IskAccount[], rate: number, allowance: number) {
   return {
     accounts: results,
     kapitalunderlag: total,
+    fribeloppApplied: applied,
+    taxableUnderlag: total - applied,
     schablonintakt: results.reduce((sum, a) => sum + a.schablonintakt, 0),
   };
 }
@@ -186,10 +204,10 @@ function computeIsk(accounts: IskAccount[], rate: number, allowance: number) {
 export function computeDisposals(
   events: SecurityEvent[],
   year: number,
-): { rows: K4Row[]; warnings: string[] } {
+): { rows: K4Row[]; warnings: Warning[] } {
   const held = new Map<string, { quantity: number; cost: number }>();
   const rows: K4Row[] = [];
-  const warnings: string[] = [];
+  const warnings: Warning[] = [];
 
   const sorted = [...events].sort((a, b) => a.date.localeCompare(b.date));
 
@@ -198,6 +216,13 @@ export function computeDisposals(
 
     if (e.kind === 'ACQUIRE') {
       held.set(e.symbol, { quantity: pos.quantity + e.quantity, cost: pos.cost + e.amountSek });
+      continue;
+    }
+
+    if (e.kind === 'REMOVE') {
+      const quantity = Math.min(e.quantity, pos.quantity);
+      const share = pos.quantity > 0 ? (pos.cost / pos.quantity) * quantity : 0;
+      held.set(e.symbol, { quantity: pos.quantity - quantity, cost: pos.cost - share });
       continue;
     }
 
@@ -210,12 +235,20 @@ export function computeDisposals(
       // imported history. Schablonmetoden is the defensible fallback.
       omkostnadsbelopp = schablonOmkostnad;
       note = 'no purchase on record, schablonmetoden (20 %) used';
-      warnings.push(`${e.symbol}: sale on ${e.date} has no recorded purchase.`);
+      warnings.push({
+        category: 'Sales with no purchase on record',
+        detail: `${e.account}: ${e.symbol} sold ${e.date}, omkostnadsbelopp set to 20 % of the proceeds.`,
+      });
     } else {
       const quantity = Math.min(e.quantity, pos.quantity);
       if (quantity < e.quantity) {
         note = 'sold more than the recorded holding';
-        warnings.push(`${e.symbol}: sale on ${e.date} exceeds the recorded holding.`);
+        warnings.push({
+          category: 'Sales larger than the recorded holding',
+          detail:
+            `${e.account}: ${e.symbol} sold ${e.date}, ${e.quantity} sold against ` +
+            `${pos.quantity} on record.`,
+        });
       }
       omkostnadsbelopp = (pos.cost / pos.quantity) * quantity;
       held.set(e.symbol, {
@@ -229,6 +262,7 @@ export function computeDisposals(
         date: e.date,
         symbol: e.symbol,
         name: e.name,
+        account: e.account,
         quantity: e.quantity,
         forsaljningspris: e.amountSek,
         omkostnadsbelopp,
@@ -275,17 +309,14 @@ export function computeTaxYear(input: TaxYearInput): TaxYearResult {
     taxReduction = 0.3 * Math.min(underskott, 100_000) + 0.21 * Math.max(0, underskott - 100_000);
   }
 
+  // Quarters still in the future are not warned about: the table marks them and
+  // the page already says the year is running.
   for (const a of isk.accounts) {
     if (a.unknownQuarters.length > 0) {
-      warnings.push(
-        `${a.name}: no valuation for ${a.unknownQuarters.length} quarter start(s), counted as 0.`,
-      );
-    }
-    if (a.projectedQuarters.length > 0) {
-      warnings.push(
-        `${a.name}: ${a.projectedQuarters.length} quarter start(s) still in the future, ` +
-          `filled with the latest value.`,
-      );
+      warnings.push({
+        category: 'Quarter starts with no valuation',
+        detail: `${a.name}: ${a.unknownQuarters.length} quarter start(s) counted as 0.`,
+      });
     }
   }
 

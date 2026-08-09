@@ -7,6 +7,7 @@ import {
   type IskAccount,
   type SecurityEvent,
   type TaxYearResult,
+  type Warning,
   type Wrapper,
 } from '../lib/swedish-tax';
 
@@ -151,7 +152,8 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
 
     const now = today();
     const partial = String(year) === now.slice(0, 4);
-    const warnings: string[] = [];
+    const warnings: Warning[] = [];
+    const warn = (category: string, detail: string) => warnings.push({ category, detail });
 
     const wrapperOf = (accountId: string): Wrapper => data.wrappers[accountId] ?? 'IGNORE';
     const byId = new Map(data.accounts.map((a) => [a.id, a]));
@@ -171,14 +173,20 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
         if (point?.fxRateToBase) return value * point.fxRateToBase;
       }
 
-      const rate = data.rates[activity.currency];
+      // GBp / GBX is pence, a hundredth of the GBP the rate table knows about.
+      const pence = activity.currency === 'GBp' || activity.currency === 'GBX';
+      const rate = pence ? data.rates.GBP / 100 : data.rates[activity.currency];
       if (rate) {
-        warnings.push(
-          `${activity.currency} amount on ${day(activity.date)} converted at today's rate.`,
+        warn(
+          'Converted at a current rate',
+          `${activity.currency} amounts use today's rate, not the rate on the transaction date.`,
         );
         return value * rate;
       }
-      warnings.push(`No ${activity.currency} to ${data.baseCurrency} rate, amount left unconverted.`);
+      warn(
+        'Missing exchange rate',
+        `No ${activity.currency} to ${data.baseCurrency} rate. Those amounts are counted unconverted.`,
+      );
       return value;
     };
 
@@ -201,27 +209,40 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
         if (a.activityType !== 'DEPOSIT') continue;
         if ([...withdrawalCurrencies].some((c) => c !== a.currency)) {
           conversionLegs.add(a.id);
-          warnings.push(
-            `${a.accountName}: deposit of ${a.currency} on ${day(a.date)} treated as a currency ` +
-              `conversion, not an insattning.`,
+          warn(
+            'Deposits read as currency conversions',
+            `${a.accountName}: ${a.currency} deposit on ${day(a.date)}, paired with a withdrawal ` +
+              `in another currency the same day.`,
           );
         }
       }
     }
 
-    /** Securities moved between two of the user's own accounts of some wrapper. */
-    const movedBetween = (activity: ActivityDetails, wrapper: Wrapper): boolean => {
+    const DAYS = 24 * 60 * 60 * 1000;
+
+    /**
+     * The other half of a securities transfer, in one of the user's own
+     * accounts. Settlement puts the two legs a few days apart, so the match is
+     * on security and quantity within a window rather than on an exact date.
+     */
+    const counterpart = (activity: ActivityDetails): ActivityDetails | undefined => {
       const opposite = activity.activityType === 'TRANSFER_IN' ? 'TRANSFER_OUT' : 'TRANSFER_IN';
-      return data.activities.some(
+      const when = new Date(`${day(activity.date)}T00:00:00Z`).getTime();
+      return data.activities.find(
         (other) =>
           other.id !== activity.id &&
           other.activityType === opposite &&
           other.accountId !== activity.accountId &&
-          wrapperOf(other.accountId) === wrapper &&
-          day(other.date) === day(activity.date) &&
+          wrapperOf(other.accountId) !== 'IGNORE' &&
           other.assetSymbol === activity.assetSymbol &&
-          Math.abs(quantityOf(other) - quantityOf(activity)) < 1e-9,
+          Math.abs(quantityOf(other) - quantityOf(activity)) < 1e-9 &&
+          Math.abs(new Date(`${day(other.date)}T00:00:00Z`).getTime() - when) <= 7 * DAYS,
       );
+    };
+
+    const landsIn = (activity: ActivityDetails): Wrapper | undefined => {
+      const other = counterpart(activity);
+      return other ? wrapperOf(other.accountId) : undefined;
     };
 
     const isk: IskAccount[] = data.accounts
@@ -254,7 +275,7 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
             if (a.activityType === 'DEPOSIT') return !conversionLegs.has(a.id);
             // Moving securities between two of your own ISKs is not an
             // insattning - only a transfer in from elsewhere is.
-            if (a.activityType === 'TRANSFER_IN') return !movedBetween(a, 'ISK');
+            if (a.activityType === 'TRANSFER_IN') return landsIn(a) !== 'ISK';
             return false;
           })
           .reduce((sum, a) => sum + toSek(a), 0);
@@ -273,7 +294,12 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
 
     for (const a of data.activities) {
       if (!depaIds.has(a.accountId)) continue;
-      const base = { date: day(a.date), symbol: a.assetSymbol, name: a.assetName };
+      const base = {
+        date: day(a.date),
+        symbol: a.assetSymbol,
+        name: a.assetName,
+        account: a.accountName,
+      };
       const fee = Number(a.fee ?? 0) || 0;
       const feeSek = fee ? toSek({ ...a, amount: String(fee) }) : 0;
 
@@ -285,21 +311,34 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
           events.push({ ...base, kind: 'DISPOSE', quantity: quantityOf(a), amountSek: toSek(a) - feeSek });
           break;
         case 'TRANSFER_IN':
-          // Between two depa accounts the pooled average cost already covers
-          // it; from outside, the cost basis is whatever came with the row.
-          if (!movedBetween(a, 'DEPA')) {
+          // A transfer is never a purchase. Between two depa accounts the
+          // pooled average cost already carries across, so the leg is dropped;
+          // from outside, the row's own value is the only basis available.
+          if (landsIn(a) !== 'DEPA') {
             events.push({ ...base, kind: 'ACQUIRE', quantity: quantityOf(a), amountSek: toSek(a) });
           }
           break;
-        case 'TRANSFER_OUT':
-          // Moving securities out of a depa into an ISK is a disposal at market
-          // value; moving them to another depa is not.
-          if (!movedBetween(a, 'DEPA')) {
+        case 'TRANSFER_OUT': {
+          // Only a move into an ISK is a disposal - the shares leave the taxable
+          // wrapper at market value. Anything else just leaves the pool.
+          const destination = landsIn(a);
+          if (destination === 'ISK') {
             events.push({ ...base, kind: 'DISPOSE', quantity: quantityOf(a), amountSek: toSek(a) });
+          } else if (destination !== 'DEPA') {
+            events.push({ ...base, kind: 'REMOVE', quantity: quantityOf(a), amountSek: 0 });
+            warn(
+              'Transfers out with no matching account',
+              `${a.accountName}: ${a.assetSymbol} left on ${day(a.date)} with no matching transfer ` +
+                `in. Removed from the holding, not counted as a sale.`,
+            );
           }
           break;
+        }
         case 'SPLIT':
-          warnings.push(`${a.assetSymbol}: split on ${day(a.date)} is not applied to the cost basis.`);
+          warn(
+            'Splits not applied',
+            `${a.accountName}: ${a.assetSymbol} split on ${day(a.date)} does not adjust the cost basis.`,
+          );
           break;
       }
     }
@@ -320,8 +359,16 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
         depaFeesSek: sumInYear((a) => depaIds.has(a.accountId) && a.activityType === 'FEE'),
       });
 
+      const seen = new Set<string>();
+      const merged = [...result.warnings, ...warnings].filter((w) => {
+        const key = `${w.category}|${w.detail}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
       return {
-        result: { ...result, warnings: [...new Set([...result.warnings, ...warnings])] },
+        result: { ...result, warnings: merged },
         partial,
         baseCurrencyWarning:
           data.baseCurrency === 'SEK'

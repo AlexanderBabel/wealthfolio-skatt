@@ -46,8 +46,12 @@ Sales where **schablonmetoden** (20 % of the proceeds) would give a lower gain a
 the figures always use the average cost. Where no purchase is on record at all, schablonmetoden
 is used as the fallback and the row is marked.
 
-Moving securities out of a depå into an ISK is a disposal at market value; moving them to
-another depå is not, and the pooled average cost carries across.
+A transfer is not a sale. Moving securities **out of a depå and into an ISK** is a disposal at
+market value, because the shares leave the taxable wrapper — that, and only that. Moving them
+to another depå changes nothing, since the average cost is pooled across depå accounts anyway.
+A transfer whose other leg is missing takes the shares off the holding without a taxable event
+and says so. The two legs are matched on security and quantity within seven days, because
+settlement rarely puts them on the same date.
 
 ### Putting them together
 
