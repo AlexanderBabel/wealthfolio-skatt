@@ -117,16 +117,18 @@ export interface SecurityEvent {
   account: string;
   /**
    * REMOVE takes shares out of the pool without a taxable disposal. REBOOK is a
-   * split or a broker re-issue: the share count changes, the cost does not.
+   * split or a broker re-issue booked as a pair of transfers: the share count
+   * changes, the cost does not. SPLIT is the same event booked as a ratio.
    */
-  kind: 'ACQUIRE' | 'DISPOSE' | 'REMOVE' | 'REBOOK';
+  kind: 'ACQUIRE' | 'DISPOSE' | 'REMOVE' | 'REBOOK' | 'SPLIT';
+  /** SPLIT: the ratio - 4 for a 4:1 split, 1/12 for a 1:12 reverse split. */
   quantity: number;
   /** REBOOK: how many shares the new `quantity` replaces. */
   replacedQuantity?: number;
   /**
    * ACQUIRE: everything paid, courtage included (adds to omkostnadsbelopp).
    * DISPOSE: proceeds after courtage (forsaljningspris, 44 kap. 13 § IL).
-   * REMOVE and REBOOK: ignored.
+   * REMOVE, REBOOK and SPLIT: ignored.
    */
   amountSek: number;
 }
@@ -259,6 +261,12 @@ export function computeDisposals(
       const quantity = Math.min(e.quantity, pos.quantity);
       const share = pos.quantity > 0 ? (pos.cost / pos.quantity) * quantity : 0;
       held.set(e.symbol, { quantity: pos.quantity - quantity, cost: pos.cost - share });
+      continue;
+    }
+
+    if (e.kind === 'SPLIT') {
+      // More shares (or fewer) for the same money: only the count changes.
+      held.set(e.symbol, { quantity: pos.quantity * e.quantity, cost: pos.cost });
       continue;
     }
 

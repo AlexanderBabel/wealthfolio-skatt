@@ -70,6 +70,10 @@ of the same security in the *same* account, days apart, with a different share c
 side. That is not a disposal either: the cost basis carries over untouched and only the number
 of shares changes.
 
+Brokers that book a split as its own `SPLIT` row instead are handled too: the ratio multiplies
+the share count and leaves the omkostnadsbelopp alone, which is also what a reverse split does,
+with a ratio below one.
+
 ### Putting them together
 
 Gains and losses on listed delägarrätter offset each other in full. A residual net loss counts
@@ -120,7 +124,6 @@ Contributions welcome; these are all deliberate omissions rather than oversights
 | **Gross dividends and foreign withholding tax** | Wealthfolio records what was credited to the account. If your import books dividends net of withholding, the addon cannot recover the gross figure or the tax paid, and INK1 7.2 wants gross. Withholding recorded as a separate `TAX` activity inside an ISK is shown as an informational line only. |
 | **Avräkning av utländsk skatt** | The real spärrbelopp prorates against income the addon cannot see. |
 | **Avsnitt C (currency gains)** | Disposing of a foreign currency balance is itself a taxable event. Not modelled. |
-| **`SPLIT` activities** | Splits booked as a paired transfer out and in are handled; a native `SPLIT` activity row is not applied to the cost basis, and the affected security is listed as a warning. |
 | **Riksbank fixings** | Amounts are converted with Wealthfolio's own daily rate history for the date of the transaction, not the Riksbank fixing a declaration would use. Small, but it is a difference. |
 
 ## Development

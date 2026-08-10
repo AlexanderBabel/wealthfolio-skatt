@@ -222,6 +222,37 @@ describe('genomsnittsmetoden', () => {
     expect(rows[0].result).toBeCloseTo(500, 6);
   });
 
+  it('applies a split booked as a ratio', () => {
+    // The shape of the reported bug: 16.3 shares bought, a 4:1 split, then
+    // 59.1 sold. Without the split that reads as a sale of shares never bought.
+    const { rows, warnings } = computeDisposals(
+      [
+        buy('2020-01-10', 16.3044962, 10000),
+        { ...buy('2020-08-31', 4, 0), kind: 'SPLIT' },
+        sell('2020-09-04', 59.1364036, 30000),
+      ],
+      2020,
+    );
+
+    expect(warnings).toHaveLength(0);
+    // 59.14 of the 65.22 shares now held, so that share of the 10 000 kr paid.
+    expect(rows[0].omkostnadsbelopp).toBeCloseTo(10000 * (59.1364036 / 65.2179848), 6);
+  });
+
+  it('applies a reverse split the same way', () => {
+    const { rows } = computeDisposals(
+      [
+        buy('2022-01-10', 120, 6000),
+        { ...buy('2022-12-13', 1 / 12, 0), kind: 'SPLIT' },
+        sell('2026-01-10', 10, 4000),
+      ],
+      2026,
+    );
+
+    expect(rows[0].omkostnadsbelopp).toBeCloseTo(6000, 6);
+    expect(rows[0].result).toBeCloseTo(-2000, 6);
+  });
+
   it('does not call a rounded-off share count an overdraft', () => {
     const { rows, warnings } = computeDisposals(
       [buy('2025-01-10', 1.9999999999999998, 1000), sell('2026-01-10', 2, 1200)],

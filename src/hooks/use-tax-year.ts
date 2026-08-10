@@ -392,12 +392,21 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
           }
           break;
         }
-        case 'SPLIT':
-          warn(
-            'Splits not applied',
-            `${a.accountName}: ${a.assetSymbol} split on ${day(a.date)} does not adjust the cost basis.`,
-          );
+        case 'SPLIT': {
+          // The ratio rides in on `amount`: 4 for a 4:1 split, 1/12 for a
+          // 1:12 reverse split.
+          const ratio = amountOf(a);
+          if (ratio > 0) {
+            events.push({ ...base, kind: 'SPLIT', quantity: ratio, amountSek: 0 });
+          } else {
+            warn(
+              'Splits without a ratio',
+              `${a.accountName}: ${a.assetSymbol} split on ${day(a.date)} carries no ratio, so the ` +
+                `cost basis per share is left as it was.`,
+            );
+          }
           break;
+        }
       }
     }
 
