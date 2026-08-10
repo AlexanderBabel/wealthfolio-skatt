@@ -41,6 +41,17 @@ export const SLR_NOV_30: Record<number, number> = {
 /** ISK exists from 1 January 2012; earlier years have no schablonintakt. */
 const ISK_FIRST_YEAR = 2012;
 
+/**
+ * Schablonintakt pa fondandelar (42 kap. 43-44 SS IL): a holder of fund units
+ * - Swedish or foreign, ETFs included - pays 0.4 % of their value at 1
+ * January as capital income, on top of any gain realised on sale. It exists
+ * only outside ISK and kapitalforsakring, since those wrappers are already
+ * taxed on their whole balance under a separate schablon. Unlike the ISK
+ * rate this one has not changed since it was introduced in 2012.
+ */
+const FUND_SCHABLON_RATE = 0.004;
+const FUND_SCHABLON_FIRST_YEAR = 2012;
+
 /** Fribelopp: kapitalunderlaget is reduced by this before the rate applies. */
 const FRIBELOPP: Record<number, number> = {
   2025: 150_000,
@@ -139,6 +150,58 @@ export interface K4Row {
   note?: string;
 }
 
+/** One line of K4 avsnitt A: a security's whole year, not one row per trade. */
+export interface K4Summary {
+  symbol: string;
+  name?: string;
+  quantity: number;
+  forsaljningspris: number;
+  omkostnadsbelopp: number;
+  vinst: number;
+  forlust: number;
+}
+
+/**
+ * Skatteverket's K4 avsnitt A wants one line per security per year - sum
+ * every disposal of it first, then round each amount to a whole krona
+ * (helt krontal) before splitting the result into vinst or forlust, so the
+ * row is internally consistent with what is printed on it.
+ */
+export function summarizeK4(rows: K4Row[]): K4Summary[] {
+  const bySymbol = new Map<string, K4Summary>();
+
+  for (const row of rows) {
+    const existing = bySymbol.get(row.symbol) ?? {
+      symbol: row.symbol,
+      name: row.name,
+      quantity: 0,
+      forsaljningspris: 0,
+      omkostnadsbelopp: 0,
+      vinst: 0,
+      forlust: 0,
+    };
+    existing.quantity += row.quantity;
+    existing.forsaljningspris += row.forsaljningspris;
+    existing.omkostnadsbelopp += row.omkostnadsbelopp;
+    bySymbol.set(row.symbol, existing);
+  }
+
+  return [...bySymbol.values()]
+    .map((s) => {
+      const forsaljningspris = Math.round(s.forsaljningspris);
+      const omkostnadsbelopp = Math.round(s.omkostnadsbelopp);
+      const result = forsaljningspris - omkostnadsbelopp;
+      return {
+        ...s,
+        forsaljningspris,
+        omkostnadsbelopp,
+        vinst: result > 0 ? result : 0,
+        forlust: result < 0 ? -result : 0,
+      };
+    })
+    .sort((a, b) => a.symbol.localeCompare(b.symbol));
+}
+
 export interface TaxYearInput {
   year: number;
   isk: IskAccount[];
@@ -150,6 +213,25 @@ export interface TaxYearInput {
   iskWithholdingSek: number;
   /** Depa fees. Forvaltningsutgifter, not deductible since 2016. */
   depaFeesSek: number;
+  /** One entry per fund/ETF symbol held in a depa on 1 January. */
+  fundHoldings: FundHolding[];
+}
+
+export interface FundHolding {
+  symbol: string;
+  name?: string;
+  /** Human label for the detected type, e.g. "ETF" or "Mutual Fund". */
+  typeLabel?: string;
+  /** Held on 1 January of the tax year. */
+  quantity: number;
+  /** Price per unit in SEK, on or before 1 January. */
+  priceSek: number;
+}
+
+export interface FundHoldingRow extends FundHolding {
+  valueSek: number;
+  /** 0.4 % of valueSek - see FUND_SCHABLON_RATE. */
+  schablonintakt: number;
 }
 
 export interface TaxYearResult {
@@ -178,6 +260,12 @@ export interface TaxYearResult {
     dividends: number;
     interest: number;
     fees: number;
+    /** One row per fund/ETF symbol, valued and taxed individually. */
+    fundHoldings: FundHoldingRow[];
+    /** Sum of fundHoldings[].valueSek. */
+    fundHoldingsSek: number;
+    /** Sum of fundHoldings[].schablonintakt. */
+    fundSchablonintakt: number;
   };
   kapitalOverskott: number;
   /** Tax to pay, SEK. Zero when the year is a deficit. */
@@ -324,6 +412,38 @@ export function computeDisposals(
   return { rows, warnings };
 }
 
+/**
+ * Quantity held per symbol immediately before `cutoff` (YYYY-MM-DD), pooled
+ * the same way as computeDisposals. Used to value fund holdings at 1 January
+ * for the fund schablonintakt - only the quantity is needed there, not the
+ * cost basis, so this replays the same event kinds without tracking cost.
+ */
+export function quantityBefore(events: SecurityEvent[], cutoff: string): Map<string, number> {
+  const held = new Map<string, number>();
+  const sorted = [...events].filter((e) => e.date < cutoff).sort((a, b) => a.date.localeCompare(b.date));
+
+  for (const e of sorted) {
+    const quantity = held.get(e.symbol) ?? 0;
+    switch (e.kind) {
+      case 'ACQUIRE':
+        held.set(e.symbol, quantity + e.quantity);
+        break;
+      case 'DISPOSE':
+      case 'REMOVE':
+        held.set(e.symbol, Math.max(0, quantity - e.quantity));
+        break;
+      case 'SPLIT':
+        held.set(e.symbol, quantity * e.quantity);
+        break;
+      case 'REBOOK':
+        held.set(e.symbol, quantity - (e.replacedQuantity ?? 0) + e.quantity);
+        break;
+    }
+  }
+
+  return held;
+}
+
 export function computeTaxYear(input: TaxYearInput): TaxYearResult {
   const configuredRate = schablonRate(input.year);
   const configuredAllowance = fribelopp(input.year);
@@ -355,8 +475,20 @@ export function computeTaxYear(input: TaxYearInput): TaxYearResult {
   // left over is quoted down to 70 % before it meets other capital income.
   const deductibleResult = netResult >= 0 ? netResult : netResult * 0.7;
 
+  const fundRateApplies = input.year >= FUND_SCHABLON_FIRST_YEAR;
+  const fundHoldings: FundHoldingRow[] = input.fundHoldings.map((f) => {
+    const valueSek = f.quantity * f.priceSek;
+    return { ...f, valueSek, schablonintakt: fundRateApplies ? valueSek * FUND_SCHABLON_RATE : 0 };
+  });
+  const fundHoldingsSek = fundHoldings.reduce((sum, f) => sum + f.valueSek, 0);
+  const fundSchablonintakt = fundHoldings.reduce((sum, f) => sum + f.schablonintakt, 0);
+
   const kapitalOverskott =
-    isk.schablonintakt + deductibleResult + input.dividendsSek + input.interestSek;
+    isk.schablonintakt +
+    deductibleResult +
+    input.dividendsSek +
+    input.interestSek +
+    fundSchablonintakt;
 
   let tax = 0;
   let taxReduction = 0;
@@ -393,6 +525,9 @@ export function computeTaxYear(input: TaxYearInput): TaxYearResult {
       dividends: input.dividendsSek,
       interest: input.interestSek,
       fees: input.depaFeesSek,
+      fundHoldings,
+      fundHoldingsSek,
+      fundSchablonintakt,
     },
     kapitalOverskott,
     tax,

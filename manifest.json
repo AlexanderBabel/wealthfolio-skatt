@@ -55,9 +55,14 @@
           "name": "getHistoricalValuations",
           "isDeclared": true,
           "isDetected": false
+        },
+        {
+          "name": "getHoldings",
+          "isDeclared": true,
+          "isDetected": false
         }
       ],
-      "purpose": "Read the account value at each quarter start, which is what the ISK kapitalunderlag is built from."
+      "purpose": "Read the account value at each quarter start for the ISK kapitalunderlag, and current depå holdings to tell fund/ETF units apart from individual shares."
     },
     {
       "category": "activities",
@@ -90,7 +95,40 @@
           "isDetected": false
         }
       ],
-      "purpose": "Read the daily exchange-rate history so a trade is converted at the rate on its own date."
+      "purpose": "Read the daily exchange-rate history so a trade is converted at the rate on its own date, and each depå holding's own price history for the fund schablonintäkt."
+    },
+    {
+      "category": "assets",
+      "functions": [
+        {
+          "name": "getProfile",
+          "isDeclared": true,
+          "isDetected": false
+        }
+      ],
+      "purpose": "Tell fund and ETF holdings in a depå apart from individual shares, since only funds carry the 0.4 % schablonintäkt."
+    },
+    {
+      "category": "events",
+      "functions": [
+        {
+          "name": "onUpdateComplete",
+          "isDeclared": true,
+          "isDetected": false
+        }
+      ],
+      "purpose": "Know when a trade, edit or import changes the portfolio, so the cached figures refresh then instead of on a timer."
+    },
+    {
+      "category": "files",
+      "functions": [
+        {
+          "name": "openSaveDialog",
+          "isDeclared": true,
+          "isDetected": false
+        }
+      ],
+      "purpose": "Save the K4 avsnitt A export as a CSV file where you choose."
     }
   ],
   "keywords": [

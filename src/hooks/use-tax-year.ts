@@ -1,20 +1,44 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   Account,
   AccountValuation,
   ActivityDetails,
   AddonContext,
+  Asset,
+  Holding,
   Quote,
 } from '@wealthfolio/addon-sdk';
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
+import type { FilerInfo } from '../lib/sru';
 import {
   computeTaxYear,
+  quantityBefore,
+  type FundHolding,
   type IskAccount,
   type SecurityEvent,
   type TaxYearResult,
   type Warning,
   type Wrapper,
 } from '../lib/swedish-tax';
+
+/**
+ * Wealthfolio's own "Instrument Type" taxonomy (source: AUTO) is a far more
+ * reliable fund/ETF signal than the market data provider's raw instrumentType
+ * - it correctly tags Xetra-listed UCITS ETFs that the provider field leaves
+ * blank. ETN and ETC are debt/commodity notes, not investeringsfonder, so
+ * they are deliberately left out even though Wealthfolio groups them nearby.
+ */
+const FUND_INSTRUMENT_KEYS = new Set(['ETF', 'FUND', 'FUND_MUTUAL', 'FUND_FOF']);
+
+/**
+ * Neither Wealthfolio's own taxonomy nor the market data provider classifies
+ * a position that has since been sold out entirely - both only look at
+ * currently-open holdings. UCITS is a regulatory label almost never seen
+ * outside a fund's own name, so it is a reliable last resort for exactly the
+ * case that matters here: a fund held on 1 January and gone by the time the
+ * addon runs.
+ */
+const FUND_NAME_PATTERN = /UCITS|\bETF\b|\bFUND\b|\bFOND(EN)?\b/i;
 
 export const WRAPPERS_KEY = 'account-wrappers';
 
@@ -35,6 +59,24 @@ export async function saveWrappers(ctx: AddonContext, wrappers: WrapperMap): Pro
   await ctx.api.storage.set(WRAPPERS_KEY, JSON.stringify(wrappers));
 }
 
+export const FILER_INFO_KEY = 'sru-filer-info';
+
+/** Personnummer and the rest of INFO.SRU's identity block, kept for next time. */
+export async function loadFilerInfo(ctx: AddonContext): Promise<FilerInfo | null> {
+  const raw = await ctx.api.storage.get(FILER_INFO_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as FilerInfo;
+  } catch {
+    ctx.api.logger.error('Stored SRU filer info is not valid JSON, ignoring it.');
+    return null;
+  }
+}
+
+export async function saveFilerInfo(ctx: AddonContext, filer: FilerInfo): Promise<void> {
+  await ctx.api.storage.set(FILER_INFO_KEY, JSON.stringify(filer));
+}
+
 interface Series {
   /** Valuations ascending by date. */
   points: AccountValuation[];
@@ -47,6 +89,19 @@ interface RatePoint {
   rate: number;
 }
 
+interface AssetInfo {
+  currency: string;
+  /** True when Wealthfolio's own instrument-type taxonomy - or, failing that, the
+   *  market data provider's instrumentType - looks like a fund or ETF. */
+  isFund: boolean;
+  /** False when neither source classified the instrument at all - isFund is then a guess. */
+  typeKnown: boolean;
+  /** Human label for the detected type, e.g. "ETF" or "Mutual Fund". */
+  typeLabel?: string;
+  /** Close prices ascending by date, for valuing the holding at 1 January. */
+  quotes: { date: string; close: number }[];
+}
+
 interface TaxData {
   accounts: Account[];
   wrappers: WrapperMap;
@@ -55,6 +110,8 @@ interface TaxData {
   baseCurrency: string;
   /** Daily rate history to base currency, keyed by the foreign currency. */
   rates: Record<string, RatePoint[]>;
+  /** One entry per symbol ever held in a depa account - for the fund schablonintakt. */
+  assets: Record<string, AssetInfo>;
   years: number[];
 }
 
@@ -87,10 +144,44 @@ function valuationAt(series: Series | undefined, date: string): AccountValuation
   return found;
 }
 
-export function useTaxData(ctx: AddonContext) {
+export interface LoadProgress {
+  /** 0..1 */
+  fraction: number;
+  label: string;
+}
+
+export function useTaxData(ctx: AddonContext, onProgress?: (progress: LoadProgress) => void) {
+  const queryClient = useQueryClient();
+
+  // Re-reading the portfolio is the slow part, so the result is kept for a
+  // full day - but a full day is a ceiling, not the real signal. Wealthfolio
+  // itself knows the moment a trade, edit or import changes the portfolio,
+  // and tells every addon via this event, so the cache is invalidated then
+  // rather than waited out.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    ctx.api.events.portfolio
+      .onUpdateComplete(() => queryClient.invalidateQueries({ queryKey: ['skatt', 'data'] }))
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch((error: unknown) =>
+        ctx.api.logger.error(`Could not listen for portfolio updates: ${String(error)}`),
+      );
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [ctx, queryClient]);
+
   return useQuery<TaxData>({
     queryKey: ['skatt', 'data'],
+    staleTime: 24 * 60 * 60 * 1000,
+    refetchOnWindowFocus: false,
     queryFn: async () => {
+      onProgress?.({ fraction: 0.02, label: 'Reading accounts and activities…' });
       const [accounts, wrappers, activities, exchangeRates] = await Promise.all([
         ctx.api.accounts.getAll(),
         loadWrappers(ctx),
@@ -105,6 +196,29 @@ export function useTaxData(ctx: AddonContext) {
       );
       const start = `${Number(firstDate.slice(0, 4)) - 1}-12-01`;
       const end = today();
+
+      const depaAccountIds = new Set(
+        accounts.filter((a) => (wrappers[a.id] ?? 'IGNORE') === 'DEPA').map((a) => a.id),
+      );
+      const depaAssetIds = new Map<string, string>();
+      const depaAssetNames = new Map<string, string>();
+      for (const a of activities) {
+        if (!depaAccountIds.has(a.accountId)) continue;
+        if (!depaAssetIds.has(a.assetSymbol)) depaAssetIds.set(a.assetSymbol, a.assetId);
+        if (a.assetName && !depaAssetNames.has(a.assetSymbol)) {
+          depaAssetNames.set(a.assetSymbol, a.assetName);
+        }
+      }
+      // Progress is one tick per network round trip below - not exact (the base
+      // currency, and so the real exchange-rate count, is not known yet), but it
+      // moves in step with the slow part: one call per account and per symbol.
+      const totalTicks =
+        tracked.length + depaAccountIds.size + depaAssetIds.size + exchangeRates.length;
+      let doneTicks = 0;
+      const tick = (label: string) => {
+        doneTicks += 1;
+        onProgress?.({ fraction: 0.05 + 0.95 * (totalTicks > 0 ? doneTicks / totalTicks : 1), label });
+      };
 
       const series: Record<string, Series> = {};
       await Promise.all(
@@ -121,10 +235,77 @@ export function useTaxData(ctx: AddonContext) {
             points: [...points].sort((a, b) => day(a.valuationDate).localeCompare(day(b.valuationDate))),
             baseCurrency: points[0]?.baseCurrency ?? 'SEK',
           };
+          tick(`Reading valuations for ${account.name}…`);
         }),
       );
 
       const base = Object.values(series)[0]?.baseCurrency ?? 'SEK';
+
+      // Wealthfolio's own instrument-type taxonomy is only available for
+      // currently-held positions, but that covers the common case; a symbol
+      // sold out entirely falls back to the market data provider below.
+      const holdingsBySymbol = new Map<string, Holding>();
+      await Promise.all(
+        [...depaAccountIds].map(async (accountId) => {
+          const holdings = await ctx.api.portfolio.getHoldings(accountId).catch(() => [] as Holding[]);
+          for (const h of holdings) {
+            if (h.instrument?.symbol && !holdingsBySymbol.has(h.instrument.symbol)) {
+              holdingsBySymbol.set(h.instrument.symbol, h);
+            }
+          }
+          tick('Reading fund/ETF classifications…');
+        }),
+      );
+
+      const assets: Record<string, AssetInfo> = {};
+      await Promise.all(
+        [...depaAssetIds].map(async ([symbol, assetId]) => {
+          const holding = holdingsBySymbol.get(symbol);
+          const category = holding?.instrument?.classifications?.assetType;
+          // The fallback only fires for a symbol Wealthfolio never classified -
+          // typically one fully sold before now, absent from current holdings.
+          const profile: Asset | null = category
+            ? null
+            : await ctx.api.assets.getProfile(assetId).catch(() => null);
+          const history = await ctx.api.quotes.getHistory(assetId).catch(() => [] as Quote[]);
+
+          const rawCurrency = holding?.instrument?.currency ?? profile?.quoteCcy ?? base;
+          // GBp/GBX quotes are pence, a hundredth of the GBP the FX history is
+          // kept in - the same quirk rateOn corrects for below.
+          const pence = rawCurrency === 'GBp' || rawCurrency === 'GBX';
+
+          // The security's own name is checked unconditionally, not just when
+          // the two sources above are silent - a data provider that has never
+          // heard of a Xetra-listed UCITS ETF often tags it "EQUITY" rather
+          // than leaving the field blank, which would otherwise block this
+          // check from ever running. "UCITS" and "ETF" are not names a stock
+          // carries, so a hit here is trusted as much as an explicit type.
+          // Wealthfolio's own classification is the one signal reliable enough
+          // to also rule a fund OUT, since it is confirmed correct against a
+          // real holding - unless it could not classify the asset at all.
+          const nameMatch = FUND_NAME_PATTERN.test(depaAssetNames.get(symbol) ?? '');
+          const providerMatch = /ETF|FUND/i.test(profile?.instrumentType ?? '');
+          const categoryKnown = !!category && category.key !== 'OTHER_UNKNOWN';
+
+          assets[symbol] = {
+            currency: pence ? 'GBP' : rawCurrency,
+            isFund: categoryKnown ? FUND_INSTRUMENT_KEYS.has(category!.key) : providerMatch || nameMatch,
+            typeKnown: categoryKnown || !!profile?.instrumentType || nameMatch,
+            typeLabel: categoryKnown
+              ? category!.name
+              : providerMatch
+                ? profile!.instrumentType!
+                : nameMatch
+                  ? 'Fund/ETF, by name'
+                  : (profile?.instrumentType ?? undefined),
+            quotes: history
+              .filter((q) => q.close > 0)
+              .map((q) => ({ date: day(q.timestamp), close: pence ? q.close / 100 : q.close }))
+              .sort((a, b) => a.date.localeCompare(b.date)),
+          };
+          tick(`Pricing ${symbol}…`);
+        }),
+      );
 
       // An exchange rate's id is the asset its quotes are stored under, so the
       // quote history of that asset is the daily rate series. That is what a
@@ -146,6 +327,7 @@ export function useTaxData(ctx: AddonContext) {
             // The current rate closes the gap between the last quote and today.
             if (r.rate > 0) points.push({ date: today(), rate: invert ? 1 / r.rate : r.rate });
             if (points.length > 0) rates[foreign] = points;
+            tick(`Reading ${foreign} exchange rates…`);
           }),
       );
 
@@ -154,6 +336,11 @@ export function useTaxData(ctx: AddonContext) {
       const years: number[] = [];
       for (let y = thisYear; y >= firstYear; y--) years.push(y);
 
+      // Some ticks above are skipped (an exchange rate not in the base
+      // currency never fires one), so the count alone will not always reach
+      // 1 - closing it out here keeps the bar from stalling short of done.
+      onProgress?.({ fraction: 1, label: 'Done' });
+
       return {
         accounts,
         wrappers,
@@ -161,6 +348,7 @@ export function useTaxData(ctx: AddonContext) {
         series,
         baseCurrency: base,
         rates,
+        assets,
         years: years.length > 0 ? years : [thisYear],
       };
     },
@@ -333,9 +521,11 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
 
     const depaIds = new Set(data.accounts.filter((a) => wrapperOf(a.id) === 'DEPA').map((a) => a.id));
     const events: SecurityEvent[] = [];
+    const symbolNames = new Map<string, string>();
 
     for (const a of data.activities) {
       if (!depaIds.has(a.accountId)) continue;
+      if (a.assetName && !symbolNames.has(a.assetSymbol)) symbolNames.set(a.assetSymbol, a.assetName);
       const base = {
         date: day(a.date),
         symbol: a.assetSymbol,
@@ -413,6 +603,62 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
     const sumInYear = (predicate: (a: ActivityDetails) => boolean) =>
       inYear.filter(predicate).reduce((sum, a) => sum + toSek(a), 0);
 
+    // Fund schablonintakt is charged on fund/ETF units held directly in a depa
+    // at 1 January - the same quantity replay computeDisposals uses, priced
+    // with the closest quote on or before that date.
+    const jan1 = `${year}-01-01`;
+    const fundHoldings: FundHolding[] = [];
+    for (const [symbol, quantity] of quantityBefore(events, jan1)) {
+      if (quantity <= 0) continue;
+      const info = data.assets[symbol];
+      if (!info?.isFund) {
+        // Wealthfolio's own classification is trusted enough to rule a fund
+        // out even when the name looks like one - but that disagreement is
+        // worth a look, since it is the one place a wrong upstream
+        // classification would otherwise disappear without a trace.
+        if (info?.typeKnown && FUND_NAME_PATTERN.test(symbolNames.get(symbol) ?? '')) {
+          warn(
+            'Classified as not a fund, but the name suggests otherwise',
+            `${symbol}${info.typeLabel ? ` (${info.typeLabel})` : ''}: looks like a fund/ETF by name. ` +
+              `Check whether it needs the 0.4 % fund schablonintakt added by hand.`,
+          );
+        }
+        continue;
+      }
+      if (!info.typeKnown) {
+        warn(
+          'Fund holdings of unknown type',
+          `${symbol}: neither Wealthfolio's own classification nor the market data provider says ` +
+            `what this is, so it is assumed not to be a fund. Check whether it needs the 0.4 % fund ` +
+            `schablonintakt added by hand.`,
+        );
+        continue;
+      }
+
+      const price = info.quotes.filter((q) => q.date <= jan1).at(-1)?.close;
+      if (price === undefined) {
+        warn('Fund holdings with no price on 1 January', `${symbol}: no quote on or before ${jan1}.`);
+        continue;
+      }
+
+      const rate = info.currency === data.baseCurrency ? 1 : rateOn(info.currency, jan1);
+      if (rate === undefined) {
+        warn(
+          'Missing exchange rate',
+          `No ${info.currency} to ${data.baseCurrency} history for ${symbol}'s fund schablonintakt.`,
+        );
+        continue;
+      }
+
+      fundHoldings.push({
+        symbol,
+        name: symbolNames.get(symbol),
+        typeLabel: info.typeLabel,
+        quantity,
+        priceSek: price * rate,
+      });
+    }
+
     const result = computeTaxYear({
       year,
       isk,
@@ -423,6 +669,7 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
         (a) => wrapperOf(a.accountId) === 'ISK' && a.activityType === 'TAX',
       ),
       depaFeesSek: sumInYear((a) => depaIds.has(a.accountId) && a.activityType === 'FEE'),
+      fundHoldings,
     });
 
     const seen = new Set<string>();

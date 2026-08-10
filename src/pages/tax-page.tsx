@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { AddonContext } from '@wealthfolio/addon-sdk';
 import {
   Alert,
@@ -11,9 +11,19 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  Input,
+  Label,
   Page,
   PageContent,
   PageHeader,
+  Progress,
   Select,
   SelectContent,
   SelectItem,
@@ -33,9 +43,34 @@ import {
   TabsTrigger,
   formatAmount,
 } from '@wealthfolio/ui';
-import { useRef, useState } from 'react';
-import { saveWrappers, useTaxData, useTaxYear, type WrapperMap } from '../hooks/use-tax-year';
-import type { K4Row, TaxYearResult, Warning, Wrapper } from '../lib/swedish-tax';
+import { Download, Landmark, RefreshCw } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  loadFilerInfo,
+  saveFilerInfo,
+  saveWrappers,
+  useTaxData,
+  useTaxYear,
+  type LoadProgress,
+  type WrapperMap,
+} from '../hooks/use-tax-year';
+import {
+  buildBlanketterSru,
+  buildInfoSru,
+  isValidPersonnummer,
+  normalizePersonnummer,
+  validateFiler,
+  type FilerInfo,
+} from '../lib/sru';
+import {
+  summarizeK4,
+  type FundHoldingRow,
+  type K4Row,
+  type K4Summary,
+  type TaxYearResult,
+  type Warning,
+  type Wrapper,
+} from '../lib/swedish-tax';
 
 const WRAPPER_LABELS: Record<Wrapper, string> = {
   ISK: 'ISK',
@@ -248,9 +283,297 @@ function IskTab({ result, currency }: { result: TaxYearResult; currency: string 
   );
 }
 
-function DepaTab({ result, currency }: { result: TaxYearResult; currency: string }) {
+/** Fund/ETF schablonintakt, one line per symbol held on 1 January. */
+function FundHoldings({
+  rows,
+  year,
+  currency,
+}: {
+  rows: FundHoldingRow[];
+  year: number;
+  currency: string;
+}) {
+  if (rows.length === 0) return null;
+  const sorted = [...rows].sort((a, b) => b.valueSek - a.valueSek);
+
+  return (
+    <div className="space-y-2">
+      <h4 className="text-sm font-medium">Fund schablonintäkt</h4>
+      <p className="text-xs text-muted-foreground">
+        0.4 % of each fund or ETF&apos;s value on 1 January {year}, taxed as capital income —
+        separate from any gain or loss on selling it.
+      </p>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Fund</TableHead>
+            <TableHead>Type</TableHead>
+            <TableHead className="text-right">Quantity</TableHead>
+            <TableHead className="text-right">Price, 1 Jan</TableHead>
+            <TableHead className="text-right">Value</TableHead>
+            <TableHead className="text-right">Schablonintäkt</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {sorted.map((row) => (
+            <TableRow key={row.symbol}>
+              <TableCell>
+                <span className="font-medium">{row.symbol}</span>
+                {row.name ? <span className="ml-2 text-muted-foreground">{row.name}</span> : null}
+              </TableCell>
+              <TableCell className="text-muted-foreground">{row.typeLabel ?? '—'}</TableCell>
+              <TableCell className="text-right tabular-nums">{row.quantity}</TableCell>
+              <TableCell className="text-right">
+                <Money value={row.priceSek} currency={currency} />
+              </TableCell>
+              <TableCell className="text-right">
+                <Money value={row.valueSek} currency={currency} />
+              </TableCell>
+              <TableCell className="text-right font-medium">
+                <Money value={row.schablonintakt} currency={currency} />
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+        <TableFooter>
+          <TableRow>
+            <TableCell colSpan={4}>Total</TableCell>
+            <TableCell className="text-right">
+              <Money value={sorted.reduce((s, r) => s + r.valueSek, 0)} currency={currency} />
+            </TableCell>
+            <TableCell className="text-right">
+              <Money value={sorted.reduce((s, r) => s + r.schablonintakt, 0)} currency={currency} />
+            </TableCell>
+          </TableRow>
+        </TableFooter>
+      </Table>
+    </div>
+  );
+}
+
+/** CSV, semicolon-separated and comma-decimal - Excel's Swedish default. */
+function k4Csv(rows: K4Summary[]): string {
+  const num = (n: number) => String(n).replace('.', ',');
+  const cell = (s: string) => `"${s.replace(/"/g, '""')}"`;
+  const lines = [
+    ['Beteckning', 'Antal', 'Försäljningspris', 'Omkostnadsbelopp', 'Vinst', 'Förlust'].join(';'),
+    ...rows.map((r) =>
+      [
+        cell(r.name ? `${r.symbol} - ${r.name}` : r.symbol),
+        num(r.quantity),
+        num(r.forsaljningspris),
+        num(r.omkostnadsbelopp),
+        num(r.vinst),
+        num(r.forlust),
+      ].join(';'),
+    ),
+  ];
+  return lines.join('\r\n');
+}
+
+const EMPTY_FILER: FilerInfo = { personnummer: '', name: '' };
+
+/**
+ * Collects the personnummer/name INFO.SRU needs - not part of Wealthfolio's
+ * own data - and saves it for next time, then writes INFO.SRU and
+ * BLANKETTER.SRU via the host's save dialog.
+ */
+function SruExportDialog({
+  ctx,
+  k4Summary,
+  year,
+}: {
+  ctx: AddonContext;
+  k4Summary: K4Summary[];
+  year: number;
+}) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [filer, setFiler] = useState<FilerInfo>(EMPTY_FILER);
+  const [errors, setErrors] = useState<string[]>([]);
+
+  const { data: saved } = useQuery({
+    queryKey: ['skatt', 'filer'],
+    queryFn: () => loadFilerInfo(ctx),
+    enabled: open,
+  });
+  useEffect(() => {
+    if (saved) setFiler(saved);
+  }, [saved]);
+
+  // Two independent mutations, not one that awaits both dialogs in a row: the
+  // host's native save dialog is one-per-click in practice, so chaining a
+  // second call onto the same click silently never opens - each file gets
+  // its own button and its own fresh click.
+  const saveInfo = useMutation({
+    mutationFn: async (next: FilerInfo) => {
+      await saveFilerInfo(ctx, next);
+      await ctx.api.files.openSaveDialog(buildInfoSru(next), 'INFO.SRU');
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['skatt', 'filer'] });
+      ctx.api.toast.success('Saved INFO.SRU.');
+    },
+    onError: (error: unknown) =>
+      ctx.api.toast.error(
+        `Could not save INFO.SRU: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+  });
+
+  const saveBlanketter = useMutation({
+    mutationFn: async (next: FilerInfo) => {
+      await saveFilerInfo(ctx, next);
+      // The exact name BLANKETTER.SRU matters - Skatteverket's service
+      // rejects a renamed duplicate such as "blanketter (1).sru".
+      await ctx.api.files.openSaveDialog(
+        buildBlanketterSru(k4Summary, next, year, new Date()),
+        'BLANKETTER.SRU',
+      );
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['skatt', 'filer'] });
+      ctx.api.toast.success('Saved BLANKETTER.SRU.');
+    },
+    onError: (error: unknown) =>
+      ctx.api.toast.error(
+        `Could not save BLANKETTER.SRU: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+  });
+
+  const set = (patch: Partial<FilerInfo>) => setFiler((f) => ({ ...f, ...patch }));
+
+  const withValidFiler = (run: (filer: FilerInfo) => void) => {
+    const normalized = { ...filer, personnummer: normalizePersonnummer(filer.personnummer) };
+    const validationErrors = validateFiler(normalized);
+    setErrors(validationErrors);
+    if (validationErrors.length === 0) run(normalized);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm">
+          <Landmark className="mr-2 h-4 w-4" />
+          Export SRU (Skatteverket)
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Export for Skatteverket</DialogTitle>
+          <DialogDescription>
+            Generates INFO.SRU and BLANKETTER.SRU for K4 avsnitt A. Skatteverket&apos;s e-service
+            wants the two files uploaded separately, not zipped together, with those exact names —
+            save them to the same folder and upload both. Saved here so this only has to be typed
+            once.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <Label htmlFor="sru-pnr">Personnummer</Label>
+            <Input
+              id="sru-pnr"
+              placeholder="ÅÅÅÅMMDDXXXX"
+              value={filer.personnummer}
+              onChange={(e) => set({ personnummer: e.target.value })}
+            />
+            {filer.personnummer && !isValidPersonnummer(normalizePersonnummer(filer.personnummer)) ? (
+              <p className="text-xs text-muted-foreground">12 digits, no dashes.</p>
+            ) : null}
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="sru-name">Name</Label>
+            <Input id="sru-name" value={filer.name} onChange={(e) => set({ name: e.target.value })} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label htmlFor="sru-address">Address (optional)</Label>
+              <Input
+                id="sru-address"
+                value={filer.address ?? ''}
+                onChange={(e) => set({ address: e.target.value })}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="sru-email">Email (optional)</Label>
+              <Input
+                id="sru-email"
+                value={filer.email ?? ''}
+                onChange={(e) => set({ email: e.target.value })}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="sru-postnr">Postnummer (optional)</Label>
+              <Input
+                id="sru-postnr"
+                value={filer.postnr ?? ''}
+                onChange={(e) => set({ postnr: e.target.value })}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="sru-postort">Postort (optional)</Label>
+              <Input
+                id="sru-postort"
+                value={filer.postort ?? ''}
+                onChange={(e) => set({ postort: e.target.value })}
+              />
+            </div>
+          </div>
+
+          {errors.length > 0 ? (
+            <Alert variant="destructive">
+              <AlertDescription>
+                <ul className="list-disc pl-4">
+                  {errors.map((e) => (
+                    <li key={e}>{e}</li>
+                  ))}
+                </ul>
+              </AlertDescription>
+            </Alert>
+          ) : null}
+
+          <p className="text-xs text-muted-foreground">
+            Avsnitt A only, {k4Summary.length} security line{k4Summary.length === 1 ? '' : 's'} for{' '}
+            {year}. This is the addon&apos;s own estimate, not a declaration — check the figures
+            against your broker before uploading.
+          </p>
+        </div>
+        <DialogFooter className="flex-col gap-2 sm:flex-col">
+          <Button
+            className="w-full"
+            variant="outline"
+            onClick={() => withValidFiler((f) => saveInfo.mutate(f))}
+            disabled={saveInfo.isPending}
+          >
+            1. Save INFO.SRU
+          </Button>
+          <Button
+            className="w-full"
+            onClick={() => withValidFiler((f) => saveBlanketter.mutate(f))}
+            disabled={saveBlanketter.isPending}
+          >
+            2. Save BLANKETTER.SRU
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function DepaTab({
+  ctx,
+  result,
+  currency,
+}: {
+  ctx: AddonContext;
+  result: TaxYearResult;
+  currency: string;
+}) {
   const { depa } = result;
   const schablonWins = depa.rows.filter((r) => r.schablonBetter);
+  const k4Summary = summarizeK4(depa.rows);
+
+  const totalCapitalIncome =
+    depa.deductibleResult + depa.dividends + depa.interest + depa.fundSchablonintakt;
 
   const summary: Array<[string, number, string?]> = [
     ['Gains', depa.gains],
@@ -259,84 +582,118 @@ function DepaTab({ result, currency }: { result: TaxYearResult; currency: string
     ['Dividends', depa.dividends, 'as imported — net of withholding tax'],
     ['Interest', depa.interest],
     ['Fees', depa.fees, 'not deductible — förvaltningsutgifter'],
+    ['Fund schablonintäkt', depa.fundSchablonintakt, 'see the table below'],
+    ['Total capital income', totalCapitalIncome],
   ];
+
+  const exportK4 = async () => {
+    try {
+      await ctx.api.files.openSaveDialog(k4Csv(k4Summary), `K4-${result.year}.csv`);
+    } catch (error) {
+      ctx.api.toast.error(
+        `Could not save the file: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
 
   return (
     <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">
+        Every sale, and every transfer of securities out of a depå into an ISK, is a disposal.
+        The gain uses genomsnittsmetoden — the pooled average cost of everything you have ever
+        held in that security across every depå account, not just what you bought this year.
+      </p>
+
+      <div className="grid grid-cols-2 gap-x-6 gap-y-4 rounded-lg border p-4 sm:grid-cols-4">
+        {summary.map(([label, value, hint], index) => (
+          <div key={label} className={index === summary.length - 1 ? 'font-medium' : undefined}>
+            <div className="text-xs text-muted-foreground">{label}</div>
+            <div className={`text-lg tabular-nums ${value < 0 ? 'text-destructive' : ''}`}>
+              <Money value={value} currency={currency} />
+            </div>
+            {hint ? <div className="text-xs text-muted-foreground">{hint}</div> : null}
+          </div>
+        ))}
+      </div>
+
       {depa.rows.length === 0 ? (
         <p className="py-8 text-center text-sm text-muted-foreground">
           No disposals in {result.year} from an account classified as Depå.
         </p>
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Date</TableHead>
-              <TableHead>Security</TableHead>
-              <TableHead>Account</TableHead>
-              <TableHead className="text-right">Quantity</TableHead>
-              <TableHead className="text-right">Proceeds</TableHead>
-              <TableHead className="text-right">Cost basis</TableHead>
-              <TableHead className="text-right">Result</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {depa.rows.map((row: K4Row, index) => (
-              <TableRow key={`${row.date}-${row.symbol}-${index}`}>
-                <TableCell className="text-muted-foreground">{row.date}</TableCell>
-                <TableCell>
-                  <span className="font-medium">{row.symbol}</span>
-                  {row.note ? (
-                    <Badge variant="warning" className="ml-2">
-                      {row.note}
-                    </Badge>
-                  ) : null}
-                  {row.schablonBetter ? (
-                    <Badge variant="info" className="ml-2">
-                      schablonmetoden is better
-                    </Badge>
-                  ) : null}
-                </TableCell>
-                <TableCell className="text-muted-foreground">{row.account}</TableCell>
-                <TableCell className="text-right tabular-nums">{row.quantity}</TableCell>
-                <TableCell className="text-right">
-                  <Money value={row.forsaljningspris} currency={currency} />
-                </TableCell>
-                <TableCell className="text-right">
-                  <Money value={row.omkostnadsbelopp} currency={currency} />
-                </TableCell>
-                <TableCell
-                  className={`text-right font-medium ${row.result < 0 ? 'text-destructive' : ''}`}
-                >
-                  <Money value={row.result} currency={currency} />
-                </TableCell>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-4">
+            <p className="text-sm text-muted-foreground">
+              Every disposal in {result.year} — a sale, or a transfer into an ISK — with the
+              försäljningspris, omkostnadsbelopp and result (vinst/förlust) it produced under
+              genomsnittsmetoden.
+            </p>
+            <div className="flex shrink-0 gap-2">
+              <Button variant="outline" size="sm" onClick={exportK4}>
+                <Download className="mr-2 h-4 w-4" />
+                Export K4 (CSV)
+              </Button>
+              <SruExportDialog ctx={ctx} k4Summary={k4Summary} year={result.year} />
+            </div>
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Date</TableHead>
+                <TableHead>Security</TableHead>
+                <TableHead>Account</TableHead>
+                <TableHead className="text-right">Quantity</TableHead>
+                <TableHead className="text-right">Proceeds</TableHead>
+                <TableHead className="text-right">Cost basis</TableHead>
+                <TableHead className="text-right">Result</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {depa.rows.map((row: K4Row, index) => (
+                <TableRow key={`${row.date}-${row.symbol}-${index}`}>
+                  <TableCell className="text-muted-foreground">{row.date}</TableCell>
+                  <TableCell>
+                    <span className="font-medium">{row.symbol}</span>
+                    {row.note ? (
+                      <Badge variant="warning" className="ml-2">
+                        {row.note}
+                      </Badge>
+                    ) : null}
+                    {row.schablonBetter ? (
+                      <Badge variant="info" className="ml-2">
+                        schablonmetoden is better
+                      </Badge>
+                    ) : null}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">{row.account}</TableCell>
+                  <TableCell className="text-right tabular-nums">{row.quantity}</TableCell>
+                  <TableCell className="text-right">
+                    <Money value={row.forsaljningspris} currency={currency} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Money value={row.omkostnadsbelopp} currency={currency} />
+                  </TableCell>
+                  <TableCell
+                    className={`text-right font-medium ${row.result < 0 ? 'text-destructive' : ''}`}
+                  >
+                    <Money value={row.result} currency={currency} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          <p className="text-xs text-muted-foreground">
+            The export sums every disposal per security into one K4 avsnitt A line, rounded to
+            whole kronor — the shape Skatteverket wants, not one row per trade. It is the avsnitt
+            A data only: no personnummer or SRU file, so it still needs typing or pasting into
+            your declaration by hand.
+          </p>
+        </div>
       )}
-
-      {depa.rows.length > 0 ? (
-        <p className="text-xs text-muted-foreground">
-          On the K4 these columns are försäljningspris, omkostnadsbelopp and vinst/förlust.
-        </p>
-      ) : null}
 
       <Separator />
 
-      <dl className="grid gap-2 sm:grid-cols-2">
-        {summary.map(([label, value, hint]) => (
-          <div key={label} className="flex items-baseline justify-between gap-4 text-sm">
-            <dt className="text-muted-foreground">
-              {label}
-              {hint ? <span className="ml-2 text-xs">({hint})</span> : null}
-            </dt>
-            <dd>
-              <Money value={value} currency={currency} />
-            </dd>
-          </div>
-        ))}
-      </dl>
+      <FundHoldings rows={depa.fundHoldings} year={result.year} currency={currency} />
 
       {schablonWins.length > 0 ? (
         <Alert>
@@ -419,7 +776,9 @@ function AccountsTab({
 }
 
 export function TaxPage({ ctx }: { ctx: AddonContext }) {
-  const { data, isLoading, error } = useTaxData(ctx);
+  const queryClient = useQueryClient();
+  const [progress, setProgress] = useState<LoadProgress>({ fraction: 0, label: 'Loading…' });
+  const { data, isLoading, isFetching, error } = useTaxData(ctx, setProgress);
   const [year, setYear] = useState<number | null>(null);
   const selectedYear = year ?? data?.years[0] ?? new Date().getFullYear();
   const view = useTaxYear(data, selectedYear);
@@ -444,27 +803,41 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
         heading="Skatt"
         text="Swedish capital income tax on ISK and depå accounts — an estimate, not a declaration."
         actions={
-          <Select
-            value={String(selectedYear)}
-            onValueChange={(value) => setYear(Number(value))}
-            disabled={!data}
-          >
-            <SelectTrigger className="w-32">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {(data?.years ?? [selectedYear]).map((y) => (
-                <SelectItem key={y} value={String(y)}>
-                  {y}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <div className="flex items-center gap-2">
+            <Select
+              value={String(selectedYear)}
+              onValueChange={(value) => setYear(Number(value))}
+              disabled={!data}
+            >
+              <SelectTrigger className="w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(data?.years ?? [selectedYear]).map((y) => (
+                  <SelectItem key={y} value={String(y)}>
+                    {y}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              variant="outline"
+              size="icon"
+              title="Re-read your portfolio — figures are cached for a few minutes otherwise"
+              disabled={isFetching}
+              onClick={() => queryClient.invalidateQueries({ queryKey: ['skatt', 'data'] })}
+            >
+              <RefreshCw className={isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
+            </Button>
+          </div>
         }
       />
       <PageContent>
         {isLoading ? (
-          <p className="py-12 text-center text-sm text-muted-foreground">Loading…</p>
+          <div className="mx-auto max-w-sm space-y-3 py-16">
+            <Progress value={progress.fraction * 100} />
+            <p className="text-center text-sm text-muted-foreground">{progress.label}</p>
+          </div>
         ) : error ? (
           <div className="space-y-6">
             <Alert variant="destructive">
@@ -547,7 +920,7 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
               <Stat
                 label="Capital surplus"
                 value={formatAmount(view.result.kapitalOverskott, currency)}
-                hint="schablonintäkt + depå result + dividends + interest"
+                hint="ISK + fund schablonintäkt, depå result, dividends, interest"
               />
             </div>
 
@@ -563,7 +936,7 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
                 <IskTab result={view.result} currency={currency} />
               </TabsContent>
               <TabsContent value="depa" className="pt-4">
-                <DepaTab result={view.result} currency={currency} />
+                <DepaTab ctx={ctx} result={view.result} currency={currency} />
               </TabsContent>
               <TabsContent value="accounts" className="pt-4">
                 {accountsTab}

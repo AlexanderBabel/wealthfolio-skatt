@@ -3,8 +3,11 @@ import {
   computeDisposals,
   computeTaxYear,
   fribelopp,
+  quantityBefore,
   schablonRate,
+  summarizeK4,
   type IskAccount,
+  type K4Row,
   type SecurityEvent,
   type TaxYearInput,
 } from './swedish-tax';
@@ -25,6 +28,7 @@ const emptyYear = (year: number): TaxYearInput => ({
   interestSek: 0,
   iskWithholdingSek: 0,
   depaFeesSek: 0,
+  fundHoldings: [],
 });
 
 describe('schablonintakt rate', () => {
@@ -344,5 +348,132 @@ describe('capital income', () => {
     });
 
     expect(result.tax).toBeCloseTo(1_800, 6);
+  });
+});
+
+describe('fund schablonintakt', () => {
+  const holding = (symbol: string, quantity: number, priceSek: number) => ({
+    symbol,
+    quantity,
+    priceSek,
+  });
+
+  it('taxes 0.4 % of the value the caller supplies, at 30 %', () => {
+    const result = computeTaxYear({
+      ...emptyYear(2024),
+      fundHoldings: [holding('AAA', 1000, 100)],
+    });
+
+    expect(result.depa.fundHoldingsSek).toBe(100_000);
+    expect(result.depa.fundSchablonintakt).toBeCloseTo(400, 6);
+    expect(result.tax).toBeCloseTo(120, 6);
+  });
+
+  it('values and taxes each fund on its own line', () => {
+    const result = computeTaxYear({
+      ...emptyYear(2024),
+      fundHoldings: [holding('AAA', 1000, 100), holding('BBB', 10, 5000)],
+    });
+
+    expect(result.depa.fundHoldings).toHaveLength(2);
+    expect(result.depa.fundHoldings[0].valueSek).toBe(100_000);
+    expect(result.depa.fundHoldings[0].schablonintakt).toBeCloseTo(400, 6);
+    expect(result.depa.fundHoldings[1].valueSek).toBe(50_000);
+    expect(result.depa.fundHoldings[1].schablonintakt).toBeCloseTo(200, 6);
+    expect(result.depa.fundSchablonintakt).toBeCloseTo(600, 6);
+  });
+
+  it('does not apply before the rule existed in 2012', () => {
+    const result = computeTaxYear({
+      ...emptyYear(2011),
+      fundHoldings: [holding('AAA', 1000, 100)],
+    });
+    expect(result.depa.fundSchablonintakt).toBe(0);
+  });
+});
+
+describe('summarizeK4', () => {
+  const row = (symbol: string, forsaljningspris: number, omkostnadsbelopp: number): K4Row => ({
+    date: '2026-01-01',
+    symbol,
+    account: 'Broker',
+    quantity: 1,
+    forsaljningspris,
+    omkostnadsbelopp,
+    result: forsaljningspris - omkostnadsbelopp,
+    schablonOmkostnad: 0,
+    schablonBetter: false,
+  });
+
+  it('sums every disposal of a security into one line', () => {
+    const rows = summarizeK4([row('AAA', 1000, 600), row('AAA', 500, 300)]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].forsaljningspris).toBe(1500);
+    expect(rows[0].omkostnadsbelopp).toBe(900);
+    expect(rows[0].vinst).toBe(600);
+    expect(rows[0].forlust).toBe(0);
+  });
+
+  it('keeps different securities on separate lines, sorted by symbol', () => {
+    const rows = summarizeK4([row('BBB', 100, 200), row('AAA', 100, 50)]);
+
+    expect(rows.map((r) => r.symbol)).toEqual(['AAA', 'BBB']);
+    expect(rows[1].vinst).toBe(0);
+    expect(rows[1].forlust).toBe(100);
+  });
+
+  it('rounds to whole kronor before splitting into vinst or forlust', () => {
+    const rows = summarizeK4([row('AAA', 100.6, 100.2)]);
+    // 101 - 100 = 1, not the unrounded 0.4 - the row must read consistently.
+    expect(rows[0].forsaljningspris).toBe(101);
+    expect(rows[0].omkostnadsbelopp).toBe(100);
+    expect(rows[0].vinst).toBe(1);
+  });
+});
+
+describe('quantityBefore', () => {
+  const buy = (date: string, symbol: string, quantity: number): SecurityEvent => ({
+    date,
+    symbol,
+    account: 'Broker',
+    kind: 'ACQUIRE',
+    quantity,
+    amountSek: 0,
+  });
+
+  it('pools acquisitions across accounts up to the cutoff', () => {
+    const held = quantityBefore(
+      [buy('2024-01-10', 'AAA', 10), { ...buy('2024-06-10', 'AAA', 5), account: 'Other' }],
+      '2025-01-01',
+    );
+    expect(held.get('AAA')).toBe(15);
+  });
+
+  it('excludes events on or after the cutoff', () => {
+    const held = quantityBefore([buy('2025-01-01', 'AAA', 10)], '2025-01-01');
+    expect(held.get('AAA')).toBeUndefined();
+  });
+
+  it('applies disposals, splits and rebooks the same as computeDisposals', () => {
+    const held = quantityBefore(
+      [
+        buy('2024-01-01', 'AAA', 100),
+        { ...buy('2024-03-01', 'AAA', 4), kind: 'SPLIT' },
+        { date: '2024-06-01', symbol: 'AAA', account: 'Broker', kind: 'DISPOSE', quantity: 150, amountSek: 0 },
+        {
+          date: '2024-09-01',
+          symbol: 'AAA',
+          account: 'Broker',
+          kind: 'REBOOK',
+          quantity: 500,
+          replacedQuantity: 250,
+          amountSek: 0,
+        },
+      ],
+      '2025-01-01',
+    );
+    // 100 x 4 = 400, minus 150 disposed = 250, rebooked into 500.
+    expect(held.get('AAA')).toBe(500);
   });
 });
