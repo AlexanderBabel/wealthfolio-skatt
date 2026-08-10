@@ -32,8 +32,8 @@ introduced in 2012 — an old year is not just an old number:
 | 2016–2017 | plus 0.75 percentage points, never below 1.25 % |
 | 2018– | plus 1.00 percentage points, never below 1.25 % |
 
-`SLR_NOV_30` carries the 30 November rate back to 2000, so depå years reach further back
-than ISK does.
+`SLR_NOV_30` only feeds the ISK schablonintäkt; depå years are unaffected by it and reach
+back as far as the imported activity does.
 
 - Withdrawals never reduce the kapitalunderlag.
 - The fribelopp (150 000 kr in 2025, 300 000 kr from 2026) is one allowance per person. It is

@@ -1,38 +1,19 @@
 # Changelog
 
-All notable changes to the wealthfolio-addon-skatt addon will be documented in this file.
+All notable changes to the Skatt addon will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-- Initial addon structure and setup
-
-### Changed
-
-### Deprecated
-
-### Removed
-
-### Fixed
-
-### Security
-
 ## [1.0.0] - {{currentDate}}
 
 ### Added
-- Initial release of wealthfolio-addon-skatt addon
-- Basic addon functionality and core features
-- Integration with Wealthfolio addon SDK v1.0.0
-- Sidebar navigation integration for easy access
-- Responsive design for all screen sizes
-
-### Features
-- Swedish tax overview for ISK and depa accounts
-- User-friendly interface
-- Compatible with Wealthfolio platform
-
-### Permissions
-- UI components access for sidebar and routing
+- Swedish capital income tax overview for ISK and depå accounts: schablonintäkt,
+  fribelopp, genomsnittsmetoden cost basis, and the combined kapitalöverskott/tax figure.
+- Account classification (ISK / Depå / not taxed) as a one-time setup step.
+- Detection of ISK-to-ISK transfers, currency-conversion pairs, splits and broker
+  re-issues, and depå-to-ISK disposals, each with the resulting warning.
+- Historic statslåneräntan table (`SLR_NOV_30`) and per-era ISK rate rules
+  (2012–2015, 2016–2017, 2018–).

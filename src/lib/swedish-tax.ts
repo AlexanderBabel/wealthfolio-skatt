@@ -16,20 +16,11 @@ export type Wrapper = 'ISK' | 'DEPA' | 'IGNORE';
 /**
  * Statslaneräntan on 30 November, in percent, keyed by the year measured.
  * The value for year Y sets the ISK rate for tax year Y+1. Riksgalden
- * publishes it in early December - add one line per year.
+ * publishes it in early December - add one line per year. Starts at 2011,
+ * the earliest year schablonRate ever looks up (ISK's first tax year is
+ * 2012); depa does not use this table at all.
  */
 export const SLR_NOV_30: Record<number, number> = {
-  2000: 5.06,
-  2001: 4.94,
-  2002: 4.85,
-  2003: 4.71,
-  2004: 3.95,
-  2005: 3.26,
-  2006: 3.54,
-  2007: 4.16,
-  2008: 2.89,
-  2009: 3.2,
-  2010: 2.84,
   2011: 1.65,
   2012: 1.49,
   2013: 2.09,
