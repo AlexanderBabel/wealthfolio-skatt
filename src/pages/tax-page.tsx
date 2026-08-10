@@ -486,23 +486,7 @@ function SruExportDialog({
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <Label htmlFor="sru-address">Address (optional)</Label>
-              <Input
-                id="sru-address"
-                value={filer.address ?? ''}
-                onChange={(e) => set({ address: e.target.value })}
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="sru-email">Email (optional)</Label>
-              <Input
-                id="sru-email"
-                value={filer.email ?? ''}
-                onChange={(e) => set({ email: e.target.value })}
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="sru-postnr">Postnummer (optional)</Label>
+              <Label htmlFor="sru-postnr">Postnummer</Label>
               <Input
                 id="sru-postnr"
                 value={filer.postnr ?? ''}
@@ -510,7 +494,7 @@ function SruExportDialog({
               />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="sru-postort">Postort (optional)</Label>
+              <Label htmlFor="sru-postort">Postort</Label>
               <Input
                 id="sru-postort"
                 value={filer.postort ?? ''}
@@ -631,7 +615,7 @@ function DepaTab({
             <div className="flex shrink-0 gap-2">
               <Button variant="outline" size="sm" onClick={exportK4}>
                 <Download className="mr-2 h-4 w-4" />
-                Export K4 (CSV)
+                Export CSV
               </Button>
               <SruExportDialog ctx={ctx} k4Summary={k4Summary} year={result.year} />
             </div>
@@ -682,12 +666,6 @@ function DepaTab({
               ))}
             </TableBody>
           </Table>
-          <p className="text-xs text-muted-foreground">
-            The export sums every disposal per security into one K4 avsnitt A line, rounded to
-            whole kronor — the shape Skatteverket wants, not one row per trade. It is the avsnitt
-            A data only: no personnummer or SRU file, so it still needs typing or pasting into
-            your declaration by hand.
-          </p>
         </div>
       )}
 

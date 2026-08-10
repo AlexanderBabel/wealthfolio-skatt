@@ -31,10 +31,8 @@ export interface FilerInfo {
   /** 12 digits, no dashes - use normalizePersonnummer() first. */
   personnummer: string;
   name: string;
-  address?: string;
-  postnr?: string;
-  postort?: string;
-  email?: string;
+  postnr: string;
+  postort: string;
 }
 
 export const normalizePersonnummer = (input: string): string => input.replace(/\D/g, '');
@@ -49,6 +47,12 @@ export function validateFiler(filer: FilerInfo): string[] {
   if (!filer.name.trim()) {
     errors.push('Name is required.');
   }
+  if (!filer.postnr.trim()) {
+    errors.push('Postnummer is required.');
+  }
+  if (!filer.postort.trim()) {
+    errors.push('Postort is required.');
+  }
   return errors;
 }
 
@@ -62,10 +66,8 @@ export function buildInfoSru(filer: FilerInfo): string {
       '#MEDIELEV_START',
       `#ORGNR ${filer.personnummer}`,
       `#NAMN ${filer.name}`,
-      `#ADRESS ${filer.address ?? ''}`,
-      `#POSTNR ${filer.postnr ?? ''}`,
-      `#POSTORT ${filer.postort ?? ''}`,
-      `#EMAIL ${filer.email ?? ''}`,
+      `#POSTNR ${filer.postnr}`,
+      `#POSTORT ${filer.postort}`,
       '#MEDIELEV_SLUT',
     ].join(CRLF) + CRLF
   );
