@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-25
+
+### Fixed
+- Classifying an account did nothing visible. The dropdown was bound to the portfolio
+  query, so saving a wrapper invalidated the whole thing — every account valuation,
+  quote history and exchange-rate series — and the control snapped back to the previous
+  value until that finished. The wrapper map is now its own cheap storage-backed query,
+  written optimistically on click, with the portfolio re-read running behind it.
+  Changing several accounts in a row no longer races.
+
+### Changed
+- Dropped the bitcoin icon from the Crypto tab; it now matches the other tab labels.
+
 ## [1.0.1] - 2026-08-25
 
 ### Changed

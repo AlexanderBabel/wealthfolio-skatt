@@ -43,7 +43,7 @@ import {
   TabsTrigger,
   formatAmount,
 } from '@wealthfolio/ui';
-import { Bitcoin, Download, Landmark, RefreshCw } from 'lucide-react';
+import { Download, Landmark, RefreshCw } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import {
   loadFilerInfo,
@@ -51,6 +51,7 @@ import {
   saveWrappers,
   useTaxData,
   useTaxYear,
+  useWrappers,
   type LoadProgress,
   type WrapperMap,
 } from '../hooks/use-tax-year';
@@ -865,13 +866,26 @@ function AccountsTab({
   const queryClient = useQueryClient();
   const mutation = useMutation({
     mutationFn: (next: WrapperMap) => saveWrappers(ctx, next),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['skatt', 'data'] }),
-    onError: (error: unknown) =>
+    // Write the new map into the cheap query before awaiting anything, so the
+    // dropdown moves on click. Re-reading the portfolio is what actually takes
+    // the time, and it is left to run behind the control rather than in front
+    // of it. Changing several accounts in a row is the normal case, so an
+    // in-flight read of the old map must not land on top of a newer choice.
+    onMutate: async (next: WrapperMap) => {
+      await queryClient.cancelQueries({ queryKey: ['skatt', 'wrappers'] });
+      const previous = queryClient.getQueryData<WrapperMap>(['skatt', 'wrappers']);
+      queryClient.setQueryData(['skatt', 'wrappers'], next);
+      return { previous };
+    },
+    onError: (error: unknown, _next, context) => {
+      if (context?.previous) queryClient.setQueryData(['skatt', 'wrappers'], context.previous);
       ctx.api.toast.error(
         `Could not save the account classification: ${
           error instanceof Error ? error.message : String(error)
         }`,
-      ),
+      );
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['skatt', 'data'] }),
   });
 
   return (
@@ -924,6 +938,9 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
   const queryClient = useQueryClient();
   const [progress, setProgress] = useState<LoadProgress>({ fraction: 0, label: 'Loading…' });
   const { data, isLoading, isFetching, error } = useTaxData(ctx, setProgress);
+  // Read separately from the portfolio query so classifying an account is
+  // instant; `data` catches up in the background.
+  const { data: wrappers } = useWrappers(ctx);
   const [year, setYear] = useState<number | null>(null);
   const selectedYear = year ?? data?.years[0] ?? new Date().getFullYear();
   const view = useTaxYear(data, selectedYear);
@@ -933,7 +950,7 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
   // Nothing on this page means anything until the accounts are classified, so
   // that is the first thing shown. Setting one account must not throw you out
   // of the screen mid-way, so leaving is an explicit click.
-  const noneClassified = !!data && !Object.values(data.wrappers).some((w) => w !== 'IGNORE');
+  const noneClassified = !!wrappers && !Object.values(wrappers).some((w) => w !== 'IGNORE');
   const [dismissed, setDismissed] = useState(false);
   // Lives here, not in CryptoTab: the SRU export is offered on both tabs and
   // has to write the same avsnitt D either way.
@@ -942,7 +959,7 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
   if (noneClassified) startedEmpty.current = true;
   const showOnboarding = !dismissed && (noneClassified || startedEmpty.current);
   const accountsTab = (
-    <AccountsTab ctx={ctx} wrappers={data?.wrappers ?? {}} accounts={data?.accounts ?? []} />
+    <AccountsTab ctx={ctx} wrappers={wrappers ?? {}} accounts={data?.accounts ?? []} />
   );
 
   return (
@@ -1078,10 +1095,7 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
               <TabsList>
                 <TabsTrigger value="isk">ISK</TabsTrigger>
                 <TabsTrigger value="depa">Depå</TabsTrigger>
-                <TabsTrigger value="crypto">
-                  <Bitcoin className="mr-1.5 h-3.5 w-3.5" />
-                  Crypto
-                </TabsTrigger>
+                <TabsTrigger value="crypto">Crypto</TabsTrigger>
                 <TabsTrigger value="accounts">Accounts</TabsTrigger>
               </TabsList>
               <TabsContent value="isk" className="pt-4">

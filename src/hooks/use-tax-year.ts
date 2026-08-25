@@ -59,6 +59,23 @@ export async function saveWrappers(ctx: AddonContext, wrappers: WrapperMap): Pro
   await ctx.api.storage.set(WRAPPERS_KEY, JSON.stringify(wrappers));
 }
 
+/**
+ * The wrapper map on its own, as a cheap storage read.
+ *
+ * `useTaxData` also loads it, but that query re-reads the whole portfolio and
+ * takes seconds. Binding the Accounts dropdown to this one instead means a
+ * selection shows up immediately rather than snapping back to the old value
+ * until the portfolio finishes reloading behind it.
+ */
+export function useWrappers(ctx: AddonContext) {
+  return useQuery<WrapperMap>({
+    queryKey: ['skatt', 'wrappers'],
+    queryFn: () => loadWrappers(ctx),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+}
+
 export const FILER_INFO_KEY = 'sru-filer-info';
 
 /** Personnummer and the rest of INFO.SRU's identity block, kept for next time. */
