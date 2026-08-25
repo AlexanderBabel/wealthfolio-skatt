@@ -9,13 +9,15 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from '@wealthfolio/ui';
 import { Download } from 'lucide-react';
+import { useMemo } from 'react';
 import { Money } from '../../components/money';
-import { EmptyState, IncomeTable, SectionHeading } from '../../components/table';
+import { EmptyState, IncomeTable } from '../../components/table';
+import { Section } from '../../components/section';
+import { SortableHead, useTableSort } from '../../components/sortable-table';
 import { k4Csv } from '../../lib/csv';
 import { summarizeK4, type K4Row, type TaxYearResult } from '../../lib/swedish-tax';
 import { FundHoldings } from './fund-holdings';
@@ -32,6 +34,23 @@ export function DepaTab({
   const { depa } = result;
   const schablonWins = depa.rows.filter((r) => r.schablonBetter);
   const k4Summary = summarizeK4(depa.rows);
+
+  const columns = useMemo(
+    () => ({
+      date: { value: (r: K4Row) => r.date, numeric: true },
+      symbol: { value: (r: K4Row) => r.symbol },
+      account: { value: (r: K4Row) => r.account },
+      quantity: { value: (r: K4Row) => r.quantity, numeric: true },
+      proceeds: { value: (r: K4Row) => r.forsaljningspris, numeric: true },
+      cost: { value: (r: K4Row) => r.omkostnadsbelopp, numeric: true },
+      result: { value: (r: K4Row) => r.result, numeric: true },
+    }),
+    [],
+  );
+  const { rows: sorted, sort, toggle } = useTableSort(depa.rows, columns, {
+    key: 'date',
+    direction: 'desc',
+  });
 
   const totalCapitalIncome =
     depa.deductibleResult + depa.dividends + depa.interest + depa.fundSchablonintakt;
@@ -77,23 +96,25 @@ export function DepaTab({
         ))}
       </div>
 
-      <div className="space-y-2">
-        <SectionHeading
-          title="Disposals"
-          count={depa.rows.length > 0 ? `${depa.rows.length} in ${result.year}` : undefined}
-          action={
-            depa.rows.length > 0 ? (
-              <Button variant="outline" size="sm" onClick={exportK4}>
-                <Download className="mr-2 h-4 w-4" />
-                Export CSV
-              </Button>
-            ) : undefined
-          }
-        >
-          Every disposal in {result.year} — a sale, or a transfer into an ISK — with the
-          försäljningspris, omkostnadsbelopp and result (vinst/förlust) it produced under
-          genomsnittsmetoden.
-        </SectionHeading>
+      <Section
+        title="Disposals"
+        count={depa.rows.length > 0 ? `${depa.rows.length} in ${result.year}` : undefined}
+        action={
+          depa.rows.length > 0 ? (
+            <Button variant="outline" size="sm" onClick={exportK4}>
+              <Download className="mr-2 h-4 w-4" />
+              Export CSV
+            </Button>
+          ) : undefined
+        }
+        description={
+          <>
+            Every disposal in {result.year} — a sale, or a transfer into an ISK — with the
+            försäljningspris, omkostnadsbelopp and result (vinst/förlust) it produced under
+            genomsnittsmetoden.
+          </>
+        }
+      >
         {depa.rows.length === 0 ? (
           <EmptyState>
             Nothing was sold in {result.year} in an account marked <strong>Depå</strong>.
@@ -103,17 +124,31 @@ export function DepaTab({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Date</TableHead>
-                <TableHead>Security</TableHead>
-                <TableHead>Account</TableHead>
-                <TableHead className="text-right">Quantity</TableHead>
-                <TableHead className="text-right">Proceeds</TableHead>
-                <TableHead className="text-right">Cost basis</TableHead>
-                <TableHead className="text-right">Result</TableHead>
+                <SortableHead column="date" sort={sort} onToggle={toggle}>
+                  Date
+                </SortableHead>
+                <SortableHead column="symbol" sort={sort} onToggle={toggle}>
+                  Security
+                </SortableHead>
+                <SortableHead column="account" sort={sort} onToggle={toggle}>
+                  Account
+                </SortableHead>
+                <SortableHead column="quantity" sort={sort} onToggle={toggle} align="right">
+                  Quantity
+                </SortableHead>
+                <SortableHead column="proceeds" sort={sort} onToggle={toggle} align="right">
+                  Proceeds
+                </SortableHead>
+                <SortableHead column="cost" sort={sort} onToggle={toggle} align="right">
+                  Cost basis
+                </SortableHead>
+                <SortableHead column="result" sort={sort} onToggle={toggle} align="right">
+                  Result
+                </SortableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {depa.rows.map((row: K4Row, index) => (
+              {sorted.map((row: K4Row, index) => (
                 <TableRow key={`${row.date}-${row.symbol}-${index}`}>
                   <TableCell className="text-muted-foreground">{row.date}</TableCell>
                   <TableCell>
@@ -148,25 +183,27 @@ export function DepaTab({
             </Table>
           </>
         )}
-      </div>
+      </Section>
 
       <Separator />
 
-      <div className="space-y-2">
-        <SectionHeading
-          title="Dividends and interest"
-          count={depa.incomeRows.length > 0 ? `${depa.incomeRows.length} payment(s)` : undefined}
-        >
-          Capital income in its own right, taxed at 30 % whatever the disposals did. Amounts are
-          as imported — if your broker books dividends net of withholding tax, that is what is
-          shown here, and INK1 7.2 wants the gross figure.
-        </SectionHeading>
+      <Section
+        title="Dividends and interest"
+        count={depa.incomeRows.length > 0 ? `${depa.incomeRows.length} payment(s)` : undefined}
+        description={
+          <>
+            Capital income in its own right, taxed at 30 % whatever the disposals did. Amounts are
+            as imported — if your broker books dividends net of withholding tax, that is what is
+            shown here, and INK1 7.2 wants the gross figure.
+          </>
+        }
+      >
         {depa.incomeRows.length > 0 ? (
           <IncomeTable rows={depa.incomeRows} currency={currency} />
         ) : (
           <EmptyState>No dividends or interest received in {result.year}.</EmptyState>
         )}
-      </div>
+      </Section>
 
       <Separator />
 

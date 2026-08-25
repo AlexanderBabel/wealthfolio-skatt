@@ -1,5 +1,8 @@
-import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@wealthfolio/ui';
-import { EmptyState, SectionHeading } from '../../components/table';
+import { Table, TableBody, TableCell, TableFooter, TableHeader, TableRow } from '@wealthfolio/ui';
+import { useMemo } from 'react';
+import { EmptyState } from '../../components/table';
+import { Section } from '../../components/section';
+import { SortableHead, useTableSort } from '../../components/sortable-table';
 import { Money } from '../../components/money';
 import type { FundHoldingRow } from '../../lib/swedish-tax';
 
@@ -13,35 +16,64 @@ export function FundHoldings({
   year: number;
   currency: string;
 }) {
-  const sorted = [...rows].sort((a, b) => b.valueSek - a.valueSek);
+  const columns = useMemo(
+    () => ({
+      symbol: { value: (r: FundHoldingRow) => r.symbol },
+      type: { value: (r: FundHoldingRow) => r.typeLabel },
+      quantity: { value: (r: FundHoldingRow) => r.quantity, numeric: true },
+      price: { value: (r: FundHoldingRow) => r.priceSek, numeric: true },
+      value: { value: (r: FundHoldingRow) => r.valueSek, numeric: true },
+      schablonintakt: { value: (r: FundHoldingRow) => r.schablonintakt, numeric: true },
+    }),
+    [],
+  );
+  const { rows: sorted, sort, toggle } = useTableSort(rows, columns, {
+    key: 'value',
+    direction: 'desc',
+  });
 
-  if (sorted.length === 0) {
+  const description = (
+    <>
+      0.4 % of each fund or ETF&apos;s value on 1 January {year}, taxed as capital income —
+      separate from any gain or loss on selling it.
+    </>
+  );
+
+  if (rows.length === 0) {
     return (
-      <div className="space-y-2">
-        <SectionHeading title="Fund schablonintäkt">
-          0.4 % of each fund or ETF&apos;s value on 1 January {year}, taxed as capital income —
-          separate from any gain or loss on selling it.
-        </SectionHeading>
+      <Section title="Fund schablonintäkt" description={description}>
         <EmptyState>No fund or ETF units held on 1 January {year}.</EmptyState>
-      </div>
+      </Section>
     );
   }
 
   return (
-    <div className="space-y-2">
-      <SectionHeading title="Fund schablonintäkt" count={`${sorted.length} holding(s)`}>
-        0.4 % of each fund or ETF&apos;s value on 1 January {year}, taxed as capital income —
-        separate from any gain or loss on selling it.
-      </SectionHeading>
+    <Section
+      title="Fund schablonintäkt"
+      count={`${rows.length} holding(s)`}
+      description={description}
+    >
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Fund</TableHead>
-            <TableHead>Type</TableHead>
-            <TableHead className="text-right">Quantity</TableHead>
-            <TableHead className="text-right">Price, 1 Jan</TableHead>
-            <TableHead className="text-right">Value</TableHead>
-            <TableHead className="text-right">Schablonintäkt</TableHead>
+            <SortableHead column="symbol" sort={sort} onToggle={toggle}>
+              Fund
+            </SortableHead>
+            <SortableHead column="type" sort={sort} onToggle={toggle}>
+              Type
+            </SortableHead>
+            <SortableHead column="quantity" sort={sort} onToggle={toggle} align="right">
+              Quantity
+            </SortableHead>
+            <SortableHead column="price" sort={sort} onToggle={toggle} align="right">
+              Price, 1 Jan
+            </SortableHead>
+            <SortableHead column="value" sort={sort} onToggle={toggle} align="right">
+              Value
+            </SortableHead>
+            <SortableHead column="schablonintakt" sort={sort} onToggle={toggle} align="right">
+              Schablonintäkt
+            </SortableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -77,6 +109,6 @@ export function FundHoldings({
           </TableRow>
         </TableFooter>
       </Table>
-    </div>
+    </Section>
   );
 }

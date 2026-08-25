@@ -17,7 +17,7 @@ import {
 } from '@wealthfolio/ui';
 import { RefreshCw } from 'lucide-react';
 import { useState } from 'react';
-import { SectionHeading } from '../../components/table';
+import { Section } from '../../components/section';
 import { saveWrappers, type WrapperMap } from '../../lib/storage';
 import type { Wrapper } from '../../lib/swedish-tax';
 import { WRAPPER_LABELS } from '../wrapper-labels';
@@ -69,13 +69,18 @@ export function AccountsTab({
 
   return (
     <div className="space-y-4">
-      <SectionHeading title="Accounts" count={`${accounts.length}`}>
-        Wealthfolio has no ISK account type, so the wrapper has to be set here. Anything left as
-        “Not taxed here” is excluded from every figure on this page. Changes are applied when you
-        save, so you can set several at once and re-read the portfolio only once.
-      </SectionHeading>
-
-      <Table>
+      <Section
+        title="Accounts"
+        count={`${accounts.length}`}
+        description={
+          <>
+            Wealthfolio has no ISK account type, so the wrapper has to be set here. Anything left
+            as “Not taxed here” is excluded from every figure on this page. Changes are applied
+            when you save, so you can set several at once and re-read the portfolio only once.
+          </>
+        }
+      >
+        <Table>
         <TableHeader>
           <TableRow>
             <TableHead>Account</TableHead>
@@ -120,7 +125,8 @@ export function AccountsTab({
             );
           })}
         </TableBody>
-      </Table>
+        </Table>
+      </Section>
 
       {changed.length > 0 ? (
         <div className="sticky bottom-0 flex items-center justify-between gap-4 rounded-lg border bg-background/95 p-3 shadow-sm backdrop-blur">

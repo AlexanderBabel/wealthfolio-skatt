@@ -8,17 +8,38 @@ import {
   TableRow,
   formatAmount,
 } from '@wealthfolio/ui';
+import { useMemo } from 'react';
 import { Money } from '../../components/money';
-import type { TaxYearResult } from '../../lib/swedish-tax';
+import { Section } from '../../components/section';
+import { SortableHead, useTableSort } from '../../components/sortable-table';
+import { EmptyState } from '../../components/table';
+import type { IskAccountResult, TaxYearResult } from '../../lib/swedish-tax';
 
 export function IskTab({ result, currency }: { result: TaxYearResult; currency: string }) {
   const quarters = ['1 Jan', '1 Apr', '1 Jul', '1 Oct'];
 
+  const columns = useMemo(
+    () => ({
+      name: { value: (a: IskAccountResult) => a.name },
+      deposits: { value: (a: IskAccountResult) => a.deposits, numeric: true },
+      kapitalunderlag: { value: (a: IskAccountResult) => a.kapitalunderlag, numeric: true },
+      fribelopp: { value: (a: IskAccountResult) => a.fribeloppShare, numeric: true },
+      schablonintakt: { value: (a: IskAccountResult) => a.schablonintakt, numeric: true },
+    }),
+    [],
+  );
+  const {
+    rows: accounts,
+    sort,
+    toggle,
+  } = useTableSort(result.isk.accounts, columns, {
+    key: 'kapitalunderlag',
+    direction: 'desc',
+  });
+
   if (result.isk.accounts.length === 0) {
     return (
-      <p className="py-8 text-center text-sm text-muted-foreground">
-        No account is classified as an ISK yet. Use the Accounts tab.
-      </p>
+      <EmptyState>No account is classified as an ISK yet. Use the Accounts tab.</EmptyState>
     );
   }
 
@@ -56,23 +77,43 @@ export function IskTab({ result, currency }: { result: TaxYearResult; currency: 
         </p>
       </div>
 
-      <Table>
+      <Section
+        title="ISK accounts"
+        count={`${result.isk.accounts.length} account(s)`}
+        description={
+          <>
+            The kapitalunderlag each account contributed: its value at the four quarter starts
+            plus the year&apos;s insättningar, divided by four.
+          </>
+        }
+      >
+        <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Account</TableHead>
+            <SortableHead column="name" sort={sort} onToggle={toggle}>
+              Account
+            </SortableHead>
             {quarters.map((q) => (
               <TableHead key={q} className="text-right">
                 {q}
               </TableHead>
             ))}
-            <TableHead className="text-right">Deposits</TableHead>
-            <TableHead className="text-right">Kapitalunderlag</TableHead>
-            <TableHead className="text-right">Fribelopp</TableHead>
-            <TableHead className="text-right">Schablonintäkt</TableHead>
+            <SortableHead column="deposits" sort={sort} onToggle={toggle} align="right">
+              Deposits
+            </SortableHead>
+            <SortableHead column="kapitalunderlag" sort={sort} onToggle={toggle} align="right">
+              Kapitalunderlag
+            </SortableHead>
+            <SortableHead column="fribelopp" sort={sort} onToggle={toggle} align="right">
+              Fribelopp
+            </SortableHead>
+            <SortableHead column="schablonintakt" sort={sort} onToggle={toggle} align="right">
+              Schablonintäkt
+            </SortableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {result.isk.accounts.map((account) => (
+          {accounts.map((account) => (
             <TableRow key={account.accountId}>
               <TableCell className="font-medium">{account.name}</TableCell>
               {account.quarterValues.map((value, index) => (
@@ -126,7 +167,8 @@ export function IskTab({ result, currency }: { result: TaxYearResult; currency: 
             </TableCell>
           </TableRow>
         </TableFooter>
-      </Table>
+        </Table>
+      </Section>
       <p className="text-xs text-muted-foreground">
         * quarter has not started yet — the latest known value is carried forward.
         {result.isk.withholding > 0 ? (

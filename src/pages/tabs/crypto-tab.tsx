@@ -6,13 +6,15 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from '@wealthfolio/ui';
 import { Download } from 'lucide-react';
+import { useMemo } from 'react';
 import { Money } from '../../components/money';
-import { EmptyState, IncomeTable, SectionHeading } from '../../components/table';
+import { EmptyState, IncomeTable } from '../../components/table';
+import { Section } from '../../components/section';
+import { SortableHead, useTableSort } from '../../components/sortable-table';
 import { k4Csv } from '../../lib/csv';
 import { detailK4, type K4Row, type TaxYearResult } from '../../lib/swedish-tax';
 
@@ -35,6 +37,23 @@ export function CryptoTab({
   // The CSV mirrors the table above it, one line per disposal. How the K4
   // itself is grouped is asked at export time instead.
   const cryptoRows = detailK4(crypto.rows);
+
+  const columns = useMemo(
+    () => ({
+      date: { value: (r: K4Row) => r.date, numeric: true },
+      symbol: { value: (r: K4Row) => r.symbol },
+      account: { value: (r: K4Row) => r.account },
+      quantity: { value: (r: K4Row) => r.quantity, numeric: true },
+      proceeds: { value: (r: K4Row) => r.forsaljningspris, numeric: true },
+      cost: { value: (r: K4Row) => r.omkostnadsbelopp, numeric: true },
+      result: { value: (r: K4Row) => r.result, numeric: true },
+    }),
+    [],
+  );
+  const { rows: sorted, sort, toggle } = useTableSort(crypto.rows, columns, {
+    key: 'date',
+    direction: 'desc',
+  });
 
   const totalCapitalIncome = crypto.deductibleResult + crypto.rewards;
 
@@ -77,22 +96,24 @@ export function CryptoTab({
         ))}
       </div>
 
-      <div className="space-y-2">
-        <SectionHeading
-          title="Disposals"
-          count={crypto.rows.length > 0 ? `${crypto.rows.length} in ${result.year}` : undefined}
-          action={
-            crypto.rows.length > 0 ? (
-              <Button variant="outline" size="sm" onClick={exportCsv}>
-                <Download className="mr-2 h-4 w-4" />
-                Export CSV
-              </Button>
-            ) : undefined
-          }
-        >
-          Every disposal in {result.year} — a sale, or a coin swapped for another coin. Each one
-          is a K4 avsnitt D row; the cost basis is the pooled average for that coin.
-        </SectionHeading>
+      <Section
+        title="Disposals"
+        count={crypto.rows.length > 0 ? `${crypto.rows.length} in ${result.year}` : undefined}
+        action={
+          crypto.rows.length > 0 ? (
+            <Button variant="outline" size="sm" onClick={exportCsv}>
+              <Download className="mr-2 h-4 w-4" />
+              Export CSV
+            </Button>
+          ) : undefined
+        }
+        description={
+          <>
+            Every disposal in {result.year} — a sale, or a coin swapped for another coin. Each one
+            is a K4 avsnitt D row; the cost basis is the pooled average for that coin.
+          </>
+        }
+      >
         {crypto.rows.length === 0 ? (
           <EmptyState>
             Nothing was sold or swapped in {result.year} in an account marked{' '}
@@ -103,17 +124,31 @@ export function CryptoTab({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Date</TableHead>
-                <TableHead>Coin</TableHead>
-                <TableHead>Account</TableHead>
-                <TableHead className="text-right">Quantity</TableHead>
-                <TableHead className="text-right">Proceeds</TableHead>
-                <TableHead className="text-right">Cost basis</TableHead>
-                <TableHead className="text-right">Result</TableHead>
+                <SortableHead column="date" sort={sort} onToggle={toggle}>
+                  Date
+                </SortableHead>
+                <SortableHead column="symbol" sort={sort} onToggle={toggle}>
+                  Coin
+                </SortableHead>
+                <SortableHead column="account" sort={sort} onToggle={toggle}>
+                  Account
+                </SortableHead>
+                <SortableHead column="quantity" sort={sort} onToggle={toggle} align="right">
+                  Quantity
+                </SortableHead>
+                <SortableHead column="proceeds" sort={sort} onToggle={toggle} align="right">
+                  Proceeds
+                </SortableHead>
+                <SortableHead column="cost" sort={sort} onToggle={toggle} align="right">
+                  Cost basis
+                </SortableHead>
+                <SortableHead column="result" sort={sort} onToggle={toggle} align="right">
+                  Result
+                </SortableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {crypto.rows.map((row: K4Row, index) => (
+              {sorted.map((row: K4Row, index) => (
                 <TableRow key={`${row.date}-${row.symbol}-${index}`}>
                   <TableCell className="text-muted-foreground">{row.date}</TableCell>
                   <TableCell>
@@ -143,27 +178,29 @@ export function CryptoTab({
             </Table>
           </>
         )}
-      </div>
+      </Section>
 
       <Separator />
 
-      <div className="space-y-2">
-        <SectionHeading
-          title="Staking, earn and airdrop rewards"
-          count={crypto.rewardRows.length > 0 ? `${crypto.rewardRows.length} receipt(s)` : undefined}
-        >
-          Coins that arrived without anything leaving to pay for them. Each is capital income at
-          its value on the day it landed, and that same value becomes its omkostnadsbelopp — so it
-          is not taxed a second time when you sell. Mined coins belong in inkomst av tjänst
-          instead, and a pure airdrop you did nothing for is normally untaxed on arrival with an
-          omkostnadsbelopp of 0; adjust those by hand.
-        </SectionHeading>
+      <Section
+        title="Staking, earn and airdrop rewards"
+        count={crypto.rewardRows.length > 0 ? `${crypto.rewardRows.length} receipt(s)` : undefined}
+        description={
+          <>
+            Coins that arrived without anything leaving to pay for them. Each is capital income at
+            its value on the day it landed, and that same value becomes its omkostnadsbelopp — so
+            it is not taxed a second time when you sell. Mined coins belong in inkomst av tjänst
+            instead, and a pure airdrop you did nothing for is normally untaxed on arrival with an
+            omkostnadsbelopp of 0; adjust those by hand.
+          </>
+        }
+      >
         {crypto.rewardRows.length > 0 ? (
           <IncomeTable rows={crypto.rewardRows} currency={currency} unit="Coins" />
         ) : (
           <EmptyState>Nothing was received in {result.year}.</EmptyState>
         )}
-      </div>
+      </Section>
     </div>
   );
 }

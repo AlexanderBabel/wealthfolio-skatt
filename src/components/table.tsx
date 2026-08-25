@@ -1,48 +1,8 @@
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableFooter,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@wealthfolio/ui';
-import type { ReactNode } from 'react';
+import { Table, TableBody, TableCell, TableFooter, TableHeader, TableRow } from '@wealthfolio/ui';
+import { useMemo, type ReactNode } from 'react';
 import type { IncomeRow } from '../lib/swedish-tax';
 import { Money } from './money';
-
-/**
- * The heading above a table: what it is, and what it is for. Every table on
- * the page carries one, so a figure is never presented without saying where
- * it came from.
- */
-export function SectionHeading({
-  title,
-  count,
-  action,
-  children,
-}: {
-  title: string;
-  /** Shown next to the title, e.g. "12 rows". */
-  count?: string;
-  action?: ReactNode;
-  children?: ReactNode;
-}) {
-  return (
-    <div className="flex items-start justify-between gap-4">
-      <div className="space-y-1">
-        <h4 className="text-base font-semibold tracking-tight">
-          {title}
-          {count ? (
-            <span className="ml-2 text-sm font-normal text-muted-foreground">{count}</span>
-          ) : null}
-        </h4>
-        {children ? <p className="text-xs text-muted-foreground">{children}</p> : null}
-      </div>
-      {action ? <div className="shrink-0">{action}</div> : null}
-    </div>
-  );
-}
+import { SortableHead, useTableSort } from './sortable-table';
 
 /**
  * What sits where a table would be when there is nothing to put in it. One
@@ -74,20 +34,50 @@ export function IncomeTable({
   const showQuantity = rows.some((r) => r.quantity !== undefined);
   const total = rows.reduce((sum, r) => sum + r.amountSek, 0);
 
+  const columns = useMemo(
+    () => ({
+      date: { value: (r: IncomeRow) => r.date, numeric: true },
+      kind: { value: (r: IncomeRow) => r.kind },
+      symbol: { value: (r: IncomeRow) => r.symbol },
+      account: { value: (r: IncomeRow) => r.account },
+      quantity: { value: (r: IncomeRow) => r.quantity, numeric: true },
+      amount: { value: (r: IncomeRow) => r.amountSek, numeric: true },
+    }),
+    [],
+  );
+  const { rows: sorted, sort, toggle } = useTableSort(rows, columns, {
+    key: 'date',
+    direction: 'desc',
+  });
+
   return (
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>Date</TableHead>
-          <TableHead>Type</TableHead>
-          <TableHead>Security</TableHead>
-          <TableHead>Account</TableHead>
-          {showQuantity ? <TableHead className="text-right">{unit ?? 'Quantity'}</TableHead> : null}
-          <TableHead className="text-right">Amount</TableHead>
+          <SortableHead column="date" sort={sort} onToggle={toggle}>
+            Date
+          </SortableHead>
+          <SortableHead column="kind" sort={sort} onToggle={toggle}>
+            Type
+          </SortableHead>
+          <SortableHead column="symbol" sort={sort} onToggle={toggle}>
+            Security
+          </SortableHead>
+          <SortableHead column="account" sort={sort} onToggle={toggle}>
+            Account
+          </SortableHead>
+          {showQuantity ? (
+            <SortableHead column="quantity" sort={sort} onToggle={toggle} align="right">
+              {unit ?? 'Quantity'}
+            </SortableHead>
+          ) : null}
+          <SortableHead column="amount" sort={sort} onToggle={toggle} align="right">
+            Amount
+          </SortableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
-        {rows.map((row, index) => (
+        {sorted.map((row, index) => (
           <TableRow key={`${row.date}-${row.symbol ?? ''}-${index}`}>
             <TableCell className="text-muted-foreground">{row.date}</TableCell>
             <TableCell className="text-muted-foreground">{row.kind ?? '—'}</TableCell>

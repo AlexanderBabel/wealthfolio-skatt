@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-25
+
+### Added
+- **Every table section collapses.** A year with disposals, dividends, rewards and fund
+  holdings in it can be folded down to its headings. The export button sits outside the
+  toggle, so clicking it no longer collapses the section under it.
+- **Sortable table headers.** Click any header to sort; click again to reverse. Amounts,
+  quantities and dates start at the big end, so one click on Result gives the biggest gains
+  and a second gives the biggest losses. Text columns start alphabetically. Rows with nothing
+  in the sorted column stay at the bottom either way, rather than sorting as if they were 0.
+  Applies to disposals, dividends and rewards, fund holdings and the ISK account table.
+- The ISK account table now sits in a section of its own with a caption, like every other
+  table, and its empty state matches the rest of the page.
+
 ## [1.1.0] - 2026-08-25
 
 ### Fixed
