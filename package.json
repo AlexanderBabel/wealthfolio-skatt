@@ -1,6 +1,6 @@
 {
   "name": "wealthfolio-skatt",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Swedish capital income tax per calendar year for ISK, depå and crypto accounts",
   "type": "module",
   "main": "dist/addon.js",
@@ -65,6 +65,6 @@
     "url": "https://github.com/AlexanderBabel/wealthfolio-skatt/issues"
   },
   "homepage": "https://github.com/AlexanderBabel/wealthfolio-skatt#readme",
-  "author": "Alex Babel",
+  "author": "AlexanderBabel",
   "packageManager": "pnpm@11.23.0"
 }
