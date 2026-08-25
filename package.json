@@ -1,5 +1,5 @@
 {
-  "name": "wealthfolio-addon-skatt",
+  "name": "wealthfolio-skatt",
   "version": "1.0.0",
   "description": "Swedish capital income tax per calendar year for ISK, depå and crypto accounts",
   "type": "module",

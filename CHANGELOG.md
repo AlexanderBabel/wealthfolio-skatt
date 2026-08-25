@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Addon id renamed from `wealthfolio-addon-skatt` to `wealthfolio-skatt`, matching
+  the repository name. The sidebar route moves to `/addons/wealthfolio-skatt` and
+  the release zip is now `wealthfolio-skatt-<version>.zip`. Wealthfolio keys an
+  installed addon by its id, so an existing install is not upgraded in place —
+  remove the old one and install this build from file.
+
 ## [1.0.0] - 2026-08-25
 
 First public release.

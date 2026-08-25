@@ -17,8 +17,8 @@ const enable: AddonEnableFunction = (ctx) => {
   addonCtx = ctx;
 
   ctx.router.add({
-    id: 'wealthfolio-addon-skatt',
-    path: '/addons/wealthfolio-addon-skatt',
+    id: 'wealthfolio-skatt',
+    path: '/addons/wealthfolio-skatt',
     component: AddonRoute,
   });
 

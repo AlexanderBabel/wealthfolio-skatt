@@ -25,7 +25,7 @@ calendar year, and shows its working at every step — so you can check it rathe
 
 ## Install
 
-1. Download **`wealthfolio-addon-skatt-<version>.zip`** from the
+1. Download **`wealthfolio-skatt-<version>.zip`** from the
    [latest release](https://github.com/AlexanderBabel/wealthfolio-skatt/releases/latest).
 2. In Wealthfolio, go to **Settings → Addons → Install Addon** and pick the zip.
 3. Review the permissions and approve. Restart Wealthfolio.
