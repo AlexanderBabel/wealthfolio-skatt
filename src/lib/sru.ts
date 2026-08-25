@@ -4,10 +4,15 @@
  *
  * Field codes are Skatteverket's own K4 faltnamnstabell (Bilaga 1 to SKV269,
  * "K4_<year>P4.DOCX"), cross-checked against ebtcap/K4SRU, a maintained
- * open-source K4 SRU generator. Only avsnitt A (marknadsnoterade
- * delagarratter - listed shares, ETFs included) is modelled; this addon does
- * not compute avsnitt C (currency) or D (unlisted/other), so those sections
- * are left out rather than guessed at.
+ * open-source K4 SRU generator. Two sections are modelled:
+ *
+ *   A  marknadsnoterade delagarratter - listed shares, ETFs included.
+ *      Nine rows per blankett, totals to ruta 54 / 81.
+ *   D  ovriga vardepapper, andra tillgangar - where kryptovaluta belongs.
+ *      Only SEVEN rows per blankett, and the totals carry their own codes
+ *      to ruta 64 / 83, where Skatteverket applies the 70 % on the loss.
+ *
+ * Avsnitt B and C are still left out rather than guessed at.
  */
 
 import type { K4Summary } from './swedish-tax';
@@ -19,8 +24,18 @@ import type { K4Summary } from './swedish-tax';
  */
 const K4_BLANKETT_SUFFIX = 'P4';
 
-/** Skatteverket splits avsnitt A across pages of at most this many rows. */
-const K4_ROWS_PER_PAGE = 9;
+/**
+ * How each modelled section is laid out on one blankett. `first` is the field
+ * code of the first row's Antal; every row is 10 codes further on, and within
+ * a row the six codes run Antal, Beteckning, Forsaljningspris,
+ * Omkostnadsbelopp, Vinst, Forlust. `sum` is [forsaljningspris,
+ * omkostnadsbelopp, vinst, forlust] - not contiguous, and not the same offsets
+ * in both sections, so they are spelled out.
+ */
+const SECTIONS = {
+  A: { first: 3100, rowsPerPage: 9, sum: [3300, 3301, 3304, 3305] },
+  D: { first: 3410, rowsPerPage: 7, sum: [3500, 3501, 3503, 3504] },
+} as const;
 
 /** Str_80 in Skatteverket's field table - beteckning is truncated to fit. */
 const BETECKNING_MAX_LENGTH = 80;
@@ -100,46 +115,61 @@ const sumK4 = (rows: K4Summary[]) =>
     { forsaljningspris: 0, omkostnadsbelopp: 0, vinst: 0, forlust: 0 },
   );
 
+/** The six #UPPGIFT lines of one row, plus the section totals for the page. */
+function sectionLines(section: keyof typeof SECTIONS, page: K4Summary[]): string[] {
+  const { first, sum } = SECTIONS[section];
+  const lines: string[] = [];
+
+  page.forEach((row, i) => {
+    const code = first + i * 10;
+    const beteckning = (row.name ? `${row.symbol} - ${row.name}` : row.symbol).slice(
+      0,
+      BETECKNING_MAX_LENGTH,
+    );
+    lines.push(`#UPPGIFT ${code} ${row.quantity}`);
+    lines.push(`#UPPGIFT ${code + 1} ${beteckning}`);
+    lines.push(`#UPPGIFT ${code + 2} ${row.forsaljningspris}`);
+    lines.push(`#UPPGIFT ${code + 3} ${row.omkostnadsbelopp}`);
+    lines.push(`#UPPGIFT ${code + 4} ${row.vinst}`);
+    lines.push(`#UPPGIFT ${code + 5} ${row.forlust}`);
+  });
+
+  if (page.length > 0) {
+    const totals = sumK4(page);
+    const values = [totals.forsaljningspris, totals.omkostnadsbelopp, totals.vinst, totals.forlust];
+    sum.forEach((code, i) => lines.push(`#UPPGIFT ${code} ${values[i]}`));
+  }
+
+  return lines;
+}
+
+/**
+ * One blankett carries both sections, so the two paginate together: a filing
+ * with 12 share rows and 3 crypto rows is two blanketter, the crypto rows
+ * riding along on the first.
+ */
 export function buildBlanketterSru(
   rows: K4Summary[],
   filer: FilerInfo,
   year: number,
   now: Date,
+  cryptoRows: K4Summary[] = [],
 ): string {
-  const pages = paginate(rows, K4_ROWS_PER_PAGE);
+  const pagesA = paginate(rows, SECTIONS.A.rowsPerPage);
+  const pagesD = paginate(cryptoRows, SECTIONS.D.rowsPerPage);
+  const pageCount = Math.max(pagesA.length, pagesD.length);
   const identitet = `${filer.personnummer} ${stamp(now)}`;
   const lines: string[] = [];
 
-  pages.forEach((page, pageIndex) => {
+  for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
     lines.push(`#BLANKETT K4-${year}${K4_BLANKETT_SUFFIX}`);
     lines.push(`#IDENTITET ${identitet}`);
     lines.push(`#NAMN ${filer.name}`);
-
-    page.forEach((row, i) => {
-      const counter = 10 + i;
-      const beteckning = (row.name ? `${row.symbol} - ${row.name}` : row.symbol).slice(
-        0,
-        BETECKNING_MAX_LENGTH,
-      );
-      lines.push(`#UPPGIFT 3${counter}0 ${row.quantity}`);
-      lines.push(`#UPPGIFT 3${counter}1 ${beteckning}`);
-      lines.push(`#UPPGIFT 3${counter}2 ${row.forsaljningspris}`);
-      lines.push(`#UPPGIFT 3${counter}3 ${row.omkostnadsbelopp}`);
-      lines.push(`#UPPGIFT 3${counter}4 ${row.vinst}`);
-      lines.push(`#UPPGIFT 3${counter}5 ${row.forlust}`);
-    });
-
-    if (page.length > 0) {
-      const totals = sumK4(page);
-      lines.push(`#UPPGIFT 3300 ${totals.forsaljningspris}`);
-      lines.push(`#UPPGIFT 3301 ${totals.omkostnadsbelopp}`);
-      lines.push(`#UPPGIFT 3304 ${totals.vinst}`);
-      lines.push(`#UPPGIFT 3305 ${totals.forlust}`);
-    }
-
+    lines.push(...sectionLines('A', pagesA[pageIndex] ?? []));
+    lines.push(...sectionLines('D', pagesD[pageIndex] ?? []));
     lines.push(`#UPPGIFT 7014 ${pageIndex + 1}`);
     lines.push('#BLANKETTSLUT');
-  });
+  }
 
   lines.push('#FIL_SLUT');
   return lines.join(CRLF) + CRLF;

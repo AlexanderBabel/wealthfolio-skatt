@@ -1,21 +1,104 @@
-# Skatt — Swedish tax overview for Wealthfolio
+<h1 align="center">Skatt</h1>
 
-A Wealthfolio addon that estimates Swedish capital income tax per calendar year, for both
-account wrappers a private investor normally holds:
+<p align="center">
+  <strong>Swedish capital income tax, per calendar year, inside Wealthfolio.</strong><br>
+  ISK, depå and crypto — with a K4 export you can upload to Skatteverket.
+</p>
 
-- **ISK** (investeringssparkonto) — taxed on a notional yield (schablonintäkt) derived from
-  the account value, whatever the account actually earned.
-- **Depå** — an ordinary taxable account, taxed on realised gains, dividends and interest.
+<p align="center">
+  <a href="https://github.com/AlexanderBabel/wealthfolio-skatt/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AlexanderBabel/wealthfolio-skatt?style=flat-square"></a>
+  <a href="https://github.com/AlexanderBabel/wealthfolio-skatt/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/AlexanderBabel/wealthfolio-skatt/ci.yml?branch=main&style=flat-square&label=ci"></a>
+  <a href="LICENSE"><img alt="Licence" src="https://img.shields.io/badge/licence-MIT-blue?style=flat-square"></a>
+  <img alt="Wealthfolio" src="https://img.shields.io/badge/Wealthfolio-%E2%89%A5%203.6.2-6366f1?style=flat-square">
+</p>
 
-It produces the number you would put in a declaration, and shows the working. It does **not**
-produce the declaration: see [Not implemented](#not-implemented).
+---
 
-> **This is an estimate.** It reads the data you imported into Wealthfolio, which is not the
-> same thing as your brokers' tax statements. Reconcile before you file.
+Wealthfolio knows every trade you made. Skatteverket wants those trades expressed as
+schablonintäkt, omkostnadsbelopp and vinst/förlust. This addon does that translation, per
+calendar year, and shows its working at every step — so you can check it rather than trust it.
 
-## What it computes
+> [!IMPORTANT]
+> **This is an estimate, not a declaration.** It reads what you imported into Wealthfolio, which
+> is not the same thing as your brokers' tax statements. Reconcile against those before you file.
+> The author is not a tax adviser, and neither is this software.
 
-### ISK
+## Install
+
+1. Download **`wealthfolio-addon-skatt-<version>.zip`** from the
+   [latest release](https://github.com/AlexanderBabel/wealthfolio-skatt/releases/latest).
+2. In Wealthfolio, go to **Settings → Addons → Install Addon** and pick the zip.
+3. Review the permissions and approve. Restart Wealthfolio.
+4. **Skatt** appears in the sidebar.
+
+Requires Wealthfolio 3.6.2 or newer. Your base currency should be SEK — the addon says so
+loudly if it is not, because Swedish tax is assessed in kronor and every figure would be off.
+
+### Permissions, and why each one is needed
+
+Nothing leaves your machine. The addon makes no network requests of its own; the files it
+writes go where you point the save dialog.
+
+| Permission | What it is for |
+|---|---|
+| `accounts.getAll` | List your accounts so you can classify each as ISK, Depå or Crypto. |
+| `activities.getAll` | Read trades, deposits, dividends and interest — the raw material. |
+| `portfolio.getHistoricalValuations` | Account value at each quarter start, for the ISK kapitalunderlag. |
+| `portfolio.getHoldings` | Tell fund and ETF units apart from ordinary shares. |
+| `assets.getProfile` | The same, for a position you have since sold out of entirely. |
+| `quotes.getHistory` | Price a holding on 1 January, and convert old trades at the rate on their own date. |
+| `currency.getAll` | Find which exchange-rate series exist. |
+| `events.onUpdateComplete` | Notice when a trade or import changes the portfolio, and refresh. |
+| `files.openSaveDialog` | Write the CSV and SRU exports where you choose. |
+
+## Quick start
+
+1. Open **Skatt** in the sidebar and go to the **Accounts** tab.
+2. Mark each account as **ISK**, **Depå**, **Crypto**, or leave it as *Not taxed here*.
+3. Pick a year. That is the whole setup.
+
+The tabs then show each wrapper's figures, the disposals behind them, and the combined
+kapitalöverskott with the tax or refund it produces.
+
+Reading the portfolio is the slow part, so results are cached — but not on a timer you have to
+wait out. Wealthfolio tells the addon the moment a trade, edit or import lands, and the cache is
+dropped there and then. The refresh button by the year picker re-reads everything on demand.
+The cache lives in memory only; it is gone when Wealthfolio restarts.
+
+## Filing with Skatteverket
+
+Both exports live on the **Depå** and **Crypto** tabs.
+
+**CSV** — semicolon-separated, comma-decimal, the way Swedish Excel expects. For checking the
+numbers, or typing them into the web form yourself.
+
+**SRU** — the file pair Skatteverket's e-service accepts alongside Inkomstdeklaration 1:
+
+1. Click **Export SRU**, fill in personnummer, name, postnummer and postort the first time.
+   All four are mandatory in the SRU identity block — the service rejects the file if any is
+   missing. They are saved locally for next year.
+2. Save **`INFO.SRU`** and **`BLANKETTER.SRU`** to the same folder. Two buttons, one per file,
+   because the native save dialog only reliably opens once per click.
+3. Upload both, as two separate files, **not zipped together**.
+
+> [!WARNING]
+> The filenames matter. Skatteverket rejects a renamed duplicate such as `blanketter (1).sru`,
+> so save into an empty folder rather than one that already holds last year's.
+
+Covers **K4 avsnitt A** (listed shares and ETFs) and **K4 avsnitt D** (crypto). Field codes come
+from Skatteverket's own K4 fältnamnstabell (`K4-<year>P4`, bilaga 1 to SKV 269): A at 3100–3185
+with totals 3300/3301/3304/3305, D at 3410–3475 with totals 3500/3501/3503/3504. Both sections
+share the same blanketter and paginate at different rates — nine rows per page for A, seven
+for D — the way the paper form does.
+
+---
+
+# How the numbers are computed
+
+Everything below is reference material. You do not need it to use the addon; you need it to
+audit the addon, which is the point.
+
+## ISK
 
 ```
 kapitalunderlag  = (value 1 Jan + 1 Apr + 1 Jul + 1 Oct + insättningar during the year) / 4
@@ -46,7 +129,7 @@ back as far as the imported activity does.
   and a deposit in another on the same day. That deposit is not an insättning either, and is
   excluded — with a warning, so you can check it was really a conversion.
 
-### Depå
+## Depå
 
 Omkostnadsbeloppet uses **genomsnittsmetoden**: the average cost of every share of that
 security held, pooled across all accounts marked Depå, recomputed from the full history rather
@@ -58,28 +141,7 @@ Sales where **schablonmetoden** (20 % of the proceeds) would give a lower gain a
 the figures always use the average cost. Where no purchase is on record at all, schablonmetoden
 is used as the fallback and the row is marked.
 
-The **Export K4 (CSV)** button on the Depå tab sums the year's disposals per security into one
-line each — antal, försäljningspris, omkostnadsbelopp and vinst/förlust, rounded to whole
-kronor — the shape Skatteverket's K4 avsnitt A wants, not one row per trade.
-
-**Export SRU (Skatteverket)**, next to it, writes the same summed lines as `INFO.SRU` and
-`BLANKETTER.SRU`, the file pair Skatteverket's e-service accepts as an upload alongside
-Inkomstdeklaration 1 — as two separate files with those exact names, **not zipped together**; the
-service is documented to reject a renamed duplicate such as `blanketter (1).sru`, so re-downloading
-into a folder that already has one from a previous year will break the upload. Two buttons, one
-per file: the host's native save dialog only reliably opens once per click, so a single button
-that tried to trigger both in a row would silently drop the second. Field codes follow
-Skatteverket's own K4 fältnamnstabell (`K4-<year>P4`, bilaga 1 to SKV 269), cross-checked against
-a maintained open-source K4 SRU generator; more than nine securities in a year split across
-multiple `#BLANKETT` pages the way the paper form does. Only avsnitt A is generated — no avsnitt C
-(currency) or D (unlisted), which this addon does not compute either. Personnummer and name
-(address, postnummer, postort and email are optional) are asked for the first time you export and
-saved locally for the next one; nothing here is sent
-anywhere by the addon itself — both files are written to a location you choose, and it is on you
-to upload them. This is the addon's own estimate, not a declaration: check the figures before you
-do.
-
-A transfer is not a sale. Moving securities **out of a depå and into an ISK** is a disposal at
+**A transfer is not a sale.** Moving securities out of a depå and into an ISK *is* a disposal at
 market value, because the shares leave the taxable wrapper — that, and only that. Moving them
 to another depå changes nothing, since the average cost is pooled across depå accounts anyway.
 A transfer whose other leg is missing takes the shares off the holding without a taxable event
@@ -93,7 +155,8 @@ to funds held in an ISK, since that wrapper is already taxed on its whole balanc
 its own line on the Depå tab: quantity, price and value on 1 January, and the schablonintäkt it
 produced.
 
-Whether a holding counts as a fund is decided from two checks:
+<details>
+<summary>How a holding is judged to be a fund</summary>
 
 - **Wealthfolio's own "Instrument Type" classification**, when the position is currently open and
   Wealthfolio managed to classify it. Its `ETF`, `FUND`, `FUND_MUTUAL` and `FUND_FOF` categories
@@ -110,38 +173,66 @@ A holding neither check can identify is flagged as a warning and left out of the
 than guessed at — and so is the rarer disagreement, where Wealthfolio's own classification says
 something other than fund but the name still looks like one.
 
-A **split or a broker re-issue** shows up in the same shape — a transfer out and a transfer in
-of the same security in the *same* account, days apart, with a different share count on each
-side. That is not a disposal either: the cost basis carries over untouched and only the number
-of shares changes.
+</details>
 
-Brokers that book a split as its own `SPLIT` row instead are handled too: the ratio multiplies
-the share count and leaves the omkostnadsbelopp alone, which is also what a reverse split does,
-with a ratio below one.
+A **split or a broker re-issue** shows up as a transfer out and a transfer in of the same
+security in the *same* account, days apart, with a different share count on each side. That is
+not a disposal either: the cost basis carries over untouched and only the number of shares
+changes. Brokers that book a split as its own `SPLIT` row instead are handled too — the ratio
+multiplies the share count and leaves the omkostnadsbelopp alone, which is also what a reverse
+split does, with a ratio below one.
 
-### Putting them together
+## Crypto
+
+Kryptovaluta is not a delägarrätt. It is an *annan tillgång*, declared on **K4 avsnitt D**, and
+three things follow from that — each one a way to get the number wrong if you reuse the Depå
+logic:
+
+- **Losses count at 70 %, and they do not net against gains first.** In avsnitt A a −10 000 wipes
+  out a +10 000 completely. In avsnitt D it does not: the gain is taxed in full, the loss is
+  quoted down to 7 000, and 3 000 is left to be taxed. A loss still helps — a pure loss year
+  becomes a skattereduktion of 30 % of the deductible 70 %, so roughly 21 öre back per krona lost.
+- **Schablonmetoden does not exist here.** The 20 %-of-proceeds fallback is a rule for listed
+  delägarrätter only. Where a purchase is missing from the imported history, the omkostnadsbelopp
+  is 0 and the whole sale is taxed — the addon warns rather than quietly inventing a cost basis.
+- **Its own pool.** Genomsnittsmetoden runs per coin across every account marked Crypto, entirely
+  separate from the depå pool. A ticker that exists in both never pools together.
+
+**Swapping one coin for another is a sale.** So is spending crypto. A swap arrives in Wealthfolio
+as a transfer out of one coin and a transfer in of another, same account, same day; the addon
+pairs them and books the outgoing leg as a disposal at the market value of what came back — that
+being the försäljningspris Skatteverket asks for, not what the coin you gave up was quoted at.
+Where several transfers land on one day, each outgoing leg takes the incoming leg closest to it
+in value, so a monthly reward drip does not get mistaken for the other half of a real swap.
+
+**Incoming transfers with nothing to match** — staking payouts, exchange earn programmes,
+airdrops — are booked as capital income at their value on arrival, and that same value becomes
+the coin's omkostnadsbelopp, so it is not taxed twice when you eventually sell. That is the right
+treatment for staking and earn. It is *not* right for mined coins (inkomst av tjänst) or for a
+pure airdrop you did nothing to receive (normally untaxed on arrival, omkostnadsbelopp 0); the
+addon warns when it books any, and those you fix by hand.
+
+Moving a coin between two of your own accounts, both marked Crypto, is not a disposal — the
+pooled cost carries across, same as between two depås. A transfer out with no traceable
+destination is removed from the holding without a taxable event, and warned about.
+
+Skatteverket asks for **one K4 row per disposal** for crypto, where avsnitt A is summarised per
+security for the whole year. The Crypto tab defaults to that and offers one-row-per-coin as the
+compact alternative; the choice drives both the CSV and avsnitt D in the SRU export.
+
+## Putting them together
 
 Gains and losses on listed delägarrätter offset each other in full. A residual net loss counts
 at 70 % against other capital income — including the ISK schablonintäkt and the fund
 schablonintäkt, which is why a bad year in the depå lowers the tax on both. A surplus is taxed
 at 30 %; a deficit becomes a tax reduction of 30 % up to 100 000 kr and 21 % above.
 
-## Setup
+## Partial and incomplete years
 
-1. Install the addon, open **Skatt** in the sidebar, go to the **Accounts** tab.
-2. Mark each account as ISK, Depå, or leave it as "Not taxed here".
-
-Nothing else is configured. Your base currency must be SEK; the addon says so loudly if it
-isn't.
-
-Reading the portfolio — valuations, quotes and fund classifications — is the slow part, so the
-result is kept for up to a day. That is a ceiling, not the real signal: Wealthfolio tells every
-addon the moment a trade, edit or import changes the portfolio, and the cache is dropped then
-rather than waited out — a new trade shows up on the next visit to the page, not tomorrow. The
-refresh button by the year picker re-reads everything on demand regardless, and saving an
-account's wrapper always refreshes automatically. The cache itself lives in memory in the addon's
-own page — nothing is written to disk or sent anywhere, and it is gone the moment Wealthfolio
-restarts or the addon reloads.
+- **The current year** is computed from the quarters that have started; the ones that have not
+  are filled with the latest known value and marked `*`. The number will move.
+- **A quarter with no valuation** is counted as 0, and listed as a warning. If the account had
+  no activity at all before that date it was genuinely empty, and no warning is raised.
 
 ## Every December: one number
 
@@ -156,30 +247,24 @@ export const SLR_NOV_30: Record<number, number> = {
 ```
 
 Until that line exists the ISK figures read 0 and say why; the depå side of the year is
-unaffected. The value is not fetched: Riksbank's API publishes the 5-year government bond yield, which is
-the input Riksgälden averages, **not** statslåneräntan itself — close enough to look right and
-wrong enough to matter.
-
-## Partial and incomplete years
-
-- **The current year** is computed from the quarters that have started; the ones that have not
-  are filled with the latest known value and marked `*`. The number will move.
-- **A quarter with no valuation** is counted as 0, and listed as a warning. If the account had
-  no activity at all before that date it was genuinely empty, and no warning is raised.
+unaffected. The value is not fetched: Riksbank's API publishes the 5-year government bond yield,
+which is the input Riksgälden averages, **not** statslåneräntan itself — close enough to look
+right and wrong enough to matter.
 
 ## Not implemented
 
-Contributions welcome; these are all deliberate omissions rather than oversights.
+Contributions welcome; these are deliberate omissions rather than oversights.
 
 | Missing | Why, and what it would take |
 |---|---|
-| **K4 avsnitt C and D in the SRU export** | The SRU export covers avsnitt A (listed shares, ETFs included) — the only section this addon computes disposals for in the first place. Currency gains (avsnitt C, see below) and unlisted securities (avsnitt D) are not modelled, so they are not in the export either. |
+| **K4 avsnitt C in the SRU export** | The export covers avsnitt A (listed shares, ETFs included) and avsnitt D (crypto) — the sections this addon computes disposals for. Currency gains (avsnitt C, see below) are not modelled, so they are not in the export either. Unlisted securities also belong in avsnitt D but are not detected as such; only accounts you mark **Crypto** feed that section. |
+| **Mining income, and airdrops you did nothing for** | Every unmatched incoming crypto transfer is booked as capital income at its value on arrival. That is right for staking and earn rewards. Mined coins belong in inkomst av tjänst, and a pure airdrop is normally untaxed on receipt with an omkostnadsbelopp of 0 — the addon warns, but you adjust those by hand. |
 | **Kapitalförsäkring** | Different formula: value on 1 Jan plus premiums paid, those in the second half counted at half. It shares the fribelopp with ISK, so adding it changes the ISK numbers too. |
 | **Gross dividends and foreign withholding tax** | Wealthfolio records what was credited to the account. If your import books dividends net of withholding, the addon cannot recover the gross figure or the tax paid, and INK1 7.2 wants gross. Withholding recorded as a separate `TAX` activity inside an ISK is shown as an informational line only. |
 | **Avräkning av utländsk skatt** | The real spärrbelopp prorates against income the addon cannot see. |
 | **Avsnitt C (currency gains)** | Disposing of a foreign currency balance is itself a taxable event. Not modelled. |
 | **Riksbank fixings** | Amounts are converted with Wealthfolio's own daily rate history for the date of the transaction, not the Riksbank fixing a declaration would use. Small, but it is a difference. |
-| **Precise fund classification** | Whether a foreign holding counts as a fund for schablonintäkt purposes is a case-by-case legal question for anything that is not a plain UCITS fund. The addon's three-source guess (see above) is a good proxy but not authoritative — a warning is raised whenever a holding could not be classified at all, or when Wealthfolio's own classification disagrees with what the name suggests. Check anything unusual by hand. |
+| **Precise fund classification** | Whether a foreign holding counts as a fund for schablonintäkt purposes is a case-by-case legal question for anything that is not a plain UCITS fund. The addon's guess is a good proxy but not authoritative — a warning is raised whenever a holding could not be classified at all, or when Wealthfolio's own classification disagrees with what the name suggests. Check anything unusual by hand. |
 
 ## Development
 
@@ -196,6 +281,19 @@ over SEK amounts — no host API, no React. Everything that reads Wealthfolio is
 [`src/hooks/use-tax-year.ts`](src/hooks/use-tax-year.ts). If you are checking the maths, the
 first file and its tests are the whole story.
 
+Bug reports are most useful with the warning text the addon showed you and the shape of the
+activities behind it. Please do not paste real personnummer or account numbers into an issue.
+
+### Releasing
+
+Bump the version in `package.json` and `manifest.json`, add a `CHANGELOG.md` section, then:
+
+```bash
+git tag v1.2.3 && git push origin v1.2.3
+```
+
+CI builds the zip and publishes the GitHub Release with that CHANGELOG section as the notes.
+
 ## Licence
 
-MIT.
+MIT — see [LICENSE](LICENSE).

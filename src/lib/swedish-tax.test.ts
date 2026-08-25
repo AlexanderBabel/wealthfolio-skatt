@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   computeDisposals,
   computeTaxYear,
+  detailK4,
   fribelopp,
   quantityBefore,
   schablonRate,
@@ -475,5 +476,101 @@ describe('quantityBefore', () => {
     );
     // 100 x 4 = 400, minus 150 disposed = 250, rebooked into 500.
     expect(held.get('AAA')).toBe(500);
+  });
+});
+
+describe('crypto (K4 avsnitt D)', () => {
+  const coin = (
+    symbol: string,
+    date: string,
+    kind: SecurityEvent['kind'],
+    quantity: number,
+    amountSek: number,
+  ): SecurityEvent => ({ date, symbol, account: 'Wallet', kind, quantity, amountSek });
+
+  it('does not let a loss offset a gain in full - each loss counts at 70 %', () => {
+    const result = computeTaxYear({
+      ...emptyYear(2026),
+      cryptoEvents: [
+        coin('BTC', '2025-01-01', 'ACQUIRE', 1, 100_000),
+        coin('BTC', '2026-02-01', 'DISPOSE', 1, 110_000), // +10 000
+        coin('ETH', '2025-01-01', 'ACQUIRE', 1, 100_000),
+        coin('ETH', '2026-02-01', 'DISPOSE', 1, 90_000), // -10 000
+      ],
+    });
+
+    expect(result.crypto.gains).toBeCloseTo(10_000, 6);
+    expect(result.crypto.losses).toBeCloseTo(10_000, 6);
+    // Shares in avsnitt A would net to exactly 0 here. Avsnitt D does not.
+    expect(result.crypto.deductibleResult).toBeCloseTo(3_000, 6);
+    expect(result.tax).toBeCloseTo(900, 6);
+  });
+
+  it('gives back 21 % of a pure loss year as skattereduktion', () => {
+    const result = computeTaxYear({
+      ...emptyYear(2026),
+      cryptoEvents: [
+        coin('BTC', '2025-01-01', 'ACQUIRE', 1, 10_000),
+        coin('BTC', '2026-02-01', 'DISPOSE', 1, 9_000),
+      ],
+    });
+
+    expect(result.crypto.deductibleResult).toBeCloseTo(-700, 6);
+    expect(result.tax).toBe(0);
+    expect(result.taxReduction).toBeCloseTo(210, 6); // 700 x 30 %
+  });
+
+  it('never falls back on schablonmetoden, which does not exist for andra tillgangar', () => {
+    const result = computeTaxYear({
+      ...emptyYear(2026),
+      cryptoEvents: [coin('BTC', '2026-02-01', 'DISPOSE', 1, 50_000)],
+    });
+
+    // A share with no purchase on record would get 20 % of the proceeds.
+    expect(result.crypto.rows[0].omkostnadsbelopp).toBe(0);
+    expect(result.crypto.rows[0].schablonOmkostnad).toBe(0);
+    expect(result.crypto.rows[0].schablonBetter).toBe(false);
+    expect(result.crypto.gains).toBeCloseTo(50_000, 6);
+    expect(result.warnings.some((w) => w.category === 'Sales with no purchase on record')).toBe(true);
+  });
+
+  it('taxes rewards on receipt and keeps the crypto pool apart from the depa pool', () => {
+    const result = computeTaxYear({
+      ...emptyYear(2026),
+      cryptoRewardsSek: 5_000,
+      // Same symbol in both pools, bought at wildly different prices: if they
+      // pooled together the omkostnadsbelopp below would not be 100.
+      events: [
+        coin('X', '2025-01-01', 'ACQUIRE', 1, 900),
+        coin('X', '2026-06-01', 'DISPOSE', 1, 900),
+      ],
+      cryptoEvents: [
+        coin('X', '2025-01-01', 'ACQUIRE', 1, 100),
+        coin('X', '2026-06-01', 'DISPOSE', 1, 300),
+      ],
+    });
+
+    expect(result.crypto.rows[0].omkostnadsbelopp).toBeCloseTo(100, 6);
+    expect(result.crypto.rewards).toBeCloseTo(5_000, 6);
+    expect(result.kapitalOverskott).toBeCloseTo(5_200, 6); // 5 000 rewards + 200 gain
+  });
+
+  it('summarises per disposal or per coin on request', () => {
+    const { rows } = computeDisposals(
+      [
+        coin('BTC', '2025-01-01', 'ACQUIRE', 2, 200),
+        coin('BTC', '2026-02-01', 'DISPOSE', 1, 150),
+        coin('BTC', '2026-03-01', 'DISPOSE', 1, 50),
+      ],
+      2026,
+      { schablonmetoden: false },
+    );
+
+    expect(detailK4(rows)).toHaveLength(2);
+    expect(detailK4(rows).map((r) => r.vinst)).toEqual([50, 0]);
+    expect(detailK4(rows).map((r) => r.forlust)).toEqual([0, 50]);
+    // Per coin the two disposals wash out into a single break-even row.
+    expect(summarizeK4(rows)).toHaveLength(1);
+    expect(summarizeK4(rows)[0]).toMatchObject({ forsaljningspris: 200, vinst: 0, forlust: 0 });
   });
 });

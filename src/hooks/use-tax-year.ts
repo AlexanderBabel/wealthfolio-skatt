@@ -600,6 +600,168 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
       }
     }
 
+    // --- Crypto (K4 avsnitt D) ------------------------------------------
+    // Its own average-cost pool, kept apart from the depa one: a coin and a
+    // share never pool together, and avsnitt D has different rules on both
+    // losses and omkostnadsbelopp.
+    const cryptoIds = new Set(
+      data.accounts.filter((a) => wrapperOf(a.id) === 'CRYPTO').map((a) => a.id),
+    );
+    const cryptoActivities = data.activities.filter((a) => cryptoIds.has(a.accountId));
+
+    /**
+     * A crypto-to-crypto swap arrives as a transfer out of one coin and a
+     * transfer in of another, same account, same day - Crypto.com books a
+     * "convert" and a token rebrand identically. Several transfers can land on
+     * the same day (a monthly reward drip alongside a real swap), so each
+     * outgoing leg takes the incoming leg closest to it in value rather than
+     * whichever the list happens to hold first.
+     */
+    const swapFor = new Map<string, ActivityDetails>();
+    const swapLegIn = new Set<string>();
+    const cryptoByDay = new Map<string, ActivityDetails[]>();
+    for (const a of cryptoActivities) {
+      if (a.activityType !== 'TRANSFER_IN' && a.activityType !== 'TRANSFER_OUT') continue;
+      const key = `${a.accountId}|${day(a.date)}`;
+      cryptoByDay.set(key, [...(cryptoByDay.get(key) ?? []), a]);
+    }
+    for (const group of cryptoByDay.values()) {
+      const available = group.filter((a) => a.activityType === 'TRANSFER_IN');
+      for (const out of group.filter((a) => a.activityType === 'TRANSFER_OUT')) {
+        const outSek = toSek(out);
+        let best: ActivityDetails | undefined;
+        let bestGap = Infinity;
+        for (const candidate of available) {
+          if (candidate.assetSymbol === out.assetSymbol) continue;
+          if (swapLegIn.has(candidate.id)) continue;
+          const gap = Math.abs(toSek(candidate) - outSek);
+          if (gap < bestGap) {
+            best = candidate;
+            bestGap = gap;
+          }
+        }
+        if (best) {
+          swapFor.set(out.id, best);
+          swapLegIn.add(best.id);
+        }
+      }
+    }
+
+    const cryptoEvents: SecurityEvent[] = [];
+    let cryptoRewardsSek = 0;
+
+    for (const a of cryptoActivities) {
+      const base = {
+        date: day(a.date),
+        symbol: a.assetSymbol,
+        name: a.assetName,
+        account: a.accountName,
+      };
+      const fee = Number(a.fee ?? 0) || 0;
+      const feeSek = fee ? toSek({ ...a, amount: String(fee) }) : 0;
+
+      switch (a.activityType) {
+        case 'BUY':
+          cryptoEvents.push({
+            ...base,
+            kind: 'ACQUIRE',
+            quantity: quantityOf(a),
+            amountSek: toSek(a) + feeSek,
+          });
+          break;
+        case 'SELL':
+          cryptoEvents.push({
+            ...base,
+            kind: 'DISPOSE',
+            quantity: quantityOf(a),
+            amountSek: toSek(a) - feeSek,
+          });
+          break;
+        case 'TRANSFER_IN': {
+          const rebooked = rebookedWith(a);
+          if (rebooked) {
+            cryptoEvents.push({
+              ...base,
+              kind: 'REBOOK',
+              quantity: quantityOf(a),
+              replacedQuantity: quantityOf(rebooked),
+              amountSek: 0,
+            });
+            break;
+          }
+          // Moving a coin between two of your own wallets is not an
+          // acquisition - the pooled average cost already carries across.
+          if (landsIn(a) === 'CRYPTO') break;
+
+          if (swapLegIn.has(a.id)) {
+            // The coin received in a swap. Its omkostnadsbelopp is what it was
+            // worth when it arrived, which is also the disposal value booked
+            // on the outgoing leg below.
+            cryptoEvents.push({
+              ...base,
+              kind: 'ACQUIRE',
+              quantity: quantityOf(a),
+              amountSek: toSek(a),
+            });
+            break;
+          }
+
+          // Nothing left it could have come from: a staking, earn or airdrop
+          // reward. Taxed as capital income the year it lands, and that same
+          // value becomes the coin's omkostnadsbelopp.
+          const valueSek = toSek(a);
+          if (day(a.date).slice(0, 4) === String(year)) cryptoRewardsSek += valueSek;
+          cryptoEvents.push({
+            ...base,
+            kind: 'ACQUIRE',
+            quantity: quantityOf(a),
+            amountSek: valueSek,
+          });
+          break;
+        }
+        case 'TRANSFER_OUT': {
+          if (rebookedWith(a)) break;
+          if (landsIn(a) === 'CRYPTO') break;
+
+          const received = swapFor.get(a.id);
+          if (received) {
+            // Forsaljningspriset is the market value of what you got in
+            // exchange, not what the coin you gave up was quoted at.
+            cryptoEvents.push({
+              ...base,
+              kind: 'DISPOSE',
+              quantity: quantityOf(a),
+              amountSek: toSek(received),
+            });
+            break;
+          }
+
+          cryptoEvents.push({ ...base, kind: 'REMOVE', quantity: quantityOf(a), amountSek: 0 });
+          warn(
+            'Crypto that left without a traceable destination',
+            `${a.accountName}: ${a.assetSymbol} left on ${day(a.date)} and arrived in no tracked ` +
+              `account. Removed from the holding, not counted as a sale - check whether it was one.`,
+          );
+          break;
+        }
+        case 'SPLIT': {
+          const ratio = amountOf(a);
+          if (ratio > 0) cryptoEvents.push({ ...base, kind: 'SPLIT', quantity: ratio, amountSek: 0 });
+          break;
+        }
+      }
+    }
+
+    if (cryptoRewardsSek > 0) {
+      warn(
+        'Crypto rewards booked as capital income',
+        `${Math.round(cryptoRewardsSek)} ${data.baseCurrency} of staking/earn/airdrop rewards are ` +
+          `taxed as capital income for ${year} and carried into the pool at that value. Mined coins ` +
+          `belong in inkomst av tjanst instead, and a pure airdrop you did nothing for is normally ` +
+          `untaxed at receipt with omkostnadsbelopp 0 - adjust those by hand.`,
+      );
+    }
+
     const sumInYear = (predicate: (a: ActivityDetails) => boolean) =>
       inYear.filter(predicate).reduce((sum, a) => sum + toSek(a), 0);
 
@@ -670,6 +832,8 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
       ),
       depaFeesSek: sumInYear((a) => depaIds.has(a.accountId) && a.activityType === 'FEE'),
       fundHoldings,
+      cryptoEvents,
+      cryptoRewardsSek,
     });
 
     const seen = new Set<string>();

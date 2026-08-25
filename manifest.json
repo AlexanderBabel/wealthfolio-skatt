@@ -1,8 +1,8 @@
 {
   "id": "wealthfolio-addon-skatt",
   "name": "Skatt (Sweden)",
-  "version": "0.1.0",
-  "description": "Swedish capital income tax per calendar year for ISK and depå accounts",
+  "version": "1.0.0",
+  "description": "Swedish capital income tax per calendar year for ISK, depå and crypto accounts",
   "author": "Alex Babel",
   "main": "dist/addon.js",
   "sdkVersion": "3.6.2",
@@ -137,7 +137,11 @@
     "tax",
     "sweden",
     "isk",
-    "skatt"
+    "depa",
+    "skatt",
+    "krypto",
+    "k4",
+    "sru"
   ],
   "license": "MIT"
 }

@@ -11,7 +11,7 @@
  * `hooks/use-tax-year.ts`, and the numbers are estimates - see README.
  */
 
-export type Wrapper = 'ISK' | 'DEPA' | 'IGNORE';
+export type Wrapper = 'ISK' | 'DEPA' | 'CRYPTO' | 'IGNORE';
 
 /**
  * Statslaneräntan on 30 November, in percent, keyed by the year measured.
@@ -202,6 +202,28 @@ export function summarizeK4(rows: K4Row[]): K4Summary[] {
     .sort((a, b) => a.symbol.localeCompare(b.symbol));
 }
 
+/**
+ * One K4 line per disposal rather than per security. Skatteverket asks for
+ * crypto that way - each avyttring on its own row - where avsnitt A is
+ * summarised per security for the whole year.
+ */
+export function detailK4(rows: K4Row[]): K4Summary[] {
+  return rows.map((row) => {
+    const forsaljningspris = Math.round(row.forsaljningspris);
+    const omkostnadsbelopp = Math.round(row.omkostnadsbelopp);
+    const result = forsaljningspris - omkostnadsbelopp;
+    return {
+      symbol: row.symbol,
+      name: row.name,
+      quantity: row.quantity,
+      forsaljningspris,
+      omkostnadsbelopp,
+      vinst: result > 0 ? result : 0,
+      forlust: result < 0 ? -result : 0,
+    };
+  });
+}
+
 export interface TaxYearInput {
   year: number;
   isk: IskAccount[];
@@ -215,6 +237,14 @@ export interface TaxYearInput {
   depaFeesSek: number;
   /** One entry per fund/ETF symbol held in a depa on 1 January. */
   fundHoldings: FundHolding[];
+  /**
+   * All-time crypto acquisitions and disposals, pooled per coin across every
+   * crypto account. Kept apart from `events` because avsnitt D has its own
+   * pool, its own loss rule and no schablonmetoden.
+   */
+  cryptoEvents?: SecurityEvent[];
+  /** Staking, earn and airdrop rewards received during the year, SEK. */
+  cryptoRewardsSek?: number;
 }
 
 export interface FundHolding {
@@ -267,6 +297,20 @@ export interface TaxYearResult {
     /** Sum of fundHoldings[].schablonintakt. */
     fundSchablonintakt: number;
   };
+  crypto: {
+    /** One row per disposal - Skatteverket asks for crypto that way. */
+    rows: K4Row[];
+    gains: number;
+    losses: number;
+    /**
+     * Gains count in full, losses only to 70 %, and - unlike avsnitt A - they
+     * do not offset each other first: a +10 000 and a -10 000 in the same year
+     * still leave 3 000 to be taxed.
+     */
+    deductibleResult: number;
+    /** Rewards booked as capital income in the year they were received. */
+    rewards: number;
+  };
   kapitalOverskott: number;
   /** Tax to pay, SEK. Zero when the year is a deficit. */
   tax: number;
@@ -313,6 +357,11 @@ function computeIsk(accounts: IskAccount[], rate: number, allowance: number) {
   };
 }
 
+export interface DisposalOptions {
+  /** Default true. False for K4 avsnitt D, where the 20 % rule does not exist. */
+  schablonmetoden?: boolean;
+}
+
 /**
  * Genomsnittsmetoden: omkostnadsbeloppet for a sale is the average cost of
  * every share of that security held, pooled across accounts. Needs the full
@@ -321,7 +370,11 @@ function computeIsk(accounts: IskAccount[], rate: number, allowance: number) {
 export function computeDisposals(
   events: SecurityEvent[],
   year: number,
+  options: DisposalOptions = {},
 ): { rows: K4Row[]; warnings: Warning[] } {
+  // Schablonmetoden is a rule for marknadsnoterade delagarratter only. Crypto
+  // is an "annan tillgang" (K4 avsnitt D), where it does not exist at all.
+  const schablonAllowed = options.schablonmetoden !== false;
   const held = new Map<string, { quantity: number; cost: number }>();
   const rows: K4Row[] = [];
   const warnings: Warning[] = [];
@@ -358,18 +411,25 @@ export function computeDisposals(
       continue;
     }
 
-    const schablonOmkostnad = e.amountSek * 0.2;
+    const schablonOmkostnad = schablonAllowed ? e.amountSek * 0.2 : 0;
     let omkostnadsbelopp: number;
     let note: string | undefined;
 
     if (pos.quantity <= 0) {
       // Nothing on record to sell from - an acquisition is missing from the
-      // imported history. Schablonmetoden is the defensible fallback.
+      // imported history. Schablonmetoden is the defensible fallback where it
+      // is allowed; where it is not, the whole proceeds are taxed and the gap
+      // has to be closed by hand.
       omkostnadsbelopp = schablonOmkostnad;
-      note = 'no purchase on record, schablonmetoden (20 %) used';
+      note = schablonAllowed
+        ? 'no purchase on record, schablonmetoden (20 %) used'
+        : 'no purchase on record, omkostnadsbelopp 0 - fill in by hand';
       warnings.push({
         category: 'Sales with no purchase on record',
-        detail: `${e.account}: ${e.symbol} sold ${e.date}, omkostnadsbelopp set to 20 % of the proceeds.`,
+        detail: schablonAllowed
+          ? `${e.account}: ${e.symbol} sold ${e.date}, omkostnadsbelopp set to 20 % of the proceeds.`
+          : `${e.account}: ${e.symbol} sold ${e.date}, and schablonmetoden does not apply to ` +
+            `andra tillgangar - omkostnadsbelopp counted as 0, so the whole sale is taxed.`,
       });
     } else {
       const quantity = Math.min(e.quantity, pos.quantity);
@@ -475,6 +535,22 @@ export function computeTaxYear(input: TaxYearInput): TaxYearResult {
   // left over is quoted down to 70 % before it meets other capital income.
   const deductibleResult = netResult >= 0 ? netResult : netResult * 0.7;
 
+  // Crypto is an "annan tillgang": its own average-cost pool, no schablonmetoden.
+  const cryptoDisposals = computeDisposals(input.cryptoEvents ?? [], input.year, {
+    schablonmetoden: false,
+  });
+  const cryptoGains = cryptoDisposals.rows
+    .filter((r) => r.result > 0)
+    .reduce((s, r) => s + r.result, 0);
+  const cryptoLosses = cryptoDisposals.rows
+    .filter((r) => r.result < 0)
+    .reduce((s, r) => s - r.result, 0);
+  // 48 kap. 20 SS IL: a loss on andra tillgangar is deductible to 70 %, and
+  // there is no full quittning against gains in the same section first.
+  const cryptoDeductible = cryptoGains - cryptoLosses * 0.7;
+  const cryptoRewards = input.cryptoRewardsSek ?? 0;
+  warnings.push(...cryptoDisposals.warnings);
+
   const fundRateApplies = input.year >= FUND_SCHABLON_FIRST_YEAR;
   const fundHoldings: FundHoldingRow[] = input.fundHoldings.map((f) => {
     const valueSek = f.quantity * f.priceSek;
@@ -488,7 +564,9 @@ export function computeTaxYear(input: TaxYearInput): TaxYearResult {
     deductibleResult +
     input.dividendsSek +
     input.interestSek +
-    fundSchablonintakt;
+    fundSchablonintakt +
+    cryptoDeductible +
+    cryptoRewards;
 
   let tax = 0;
   let taxReduction = 0;
@@ -528,6 +606,13 @@ export function computeTaxYear(input: TaxYearInput): TaxYearResult {
       fundHoldings,
       fundHoldingsSek,
       fundSchablonintakt,
+    },
+    crypto: {
+      rows: cryptoDisposals.rows,
+      gains: cryptoGains,
+      losses: cryptoLosses,
+      deductibleResult: cryptoDeductible,
+      rewards: cryptoRewards,
     },
     kapitalOverskott,
     tax,

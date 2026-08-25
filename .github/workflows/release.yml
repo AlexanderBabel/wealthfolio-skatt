@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # A tag is cheap to push and expensive to un-publish, so everything is
+      # verified before anything is uploaded.
+      - name: Tag matches package.json and manifest.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(node -p "require('./package.json').version")
+          man=$(node -p "require('./manifest.json').version")
+          echo "tag=$tag package.json=$pkg manifest.json=$man"
+          [ "$tag" = "$pkg" ] && [ "$tag" = "$man" ] || {
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json ($pkg) / manifest.json ($man)"
+            exit 1
+          }
+
+      - name: Type-check
+        run: pnpm type-check
+
+      - name: Test
+        run: pnpm test
+
+      - name: Bundle
+        run: pnpm bundle
+
+      # Everything under this version's heading in CHANGELOG.md, up to the next
+      # "## " heading. Absent or empty is a hard failure rather than a release
+      # with blank notes.
+      - name: Extract release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::error::no CHANGELOG.md section for [$version]"
+            exit 1
+          fi
+          cat RELEASE_NOTES.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: dist/*.zip
+          fail_on_unmatched_files: true

@@ -1,12 +1,18 @@
 {
   "name": "wealthfolio-addon-skatt",
   "version": "1.0.0",
-  "description": "Swedish tax overview for ISK and depa accounts",
+  "description": "Swedish capital income tax per calendar year for ISK, depå and crypto accounts",
   "type": "module",
   "main": "dist/addon.js",
   "keywords": [
     "wealthfolio",
-    "addon"
+    "addon",
+    "tax",
+    "sweden",
+    "isk",
+    "skatt",
+    "k4",
+    "sru"
   ],
   "license": "MIT",
   "scripts": {
@@ -16,6 +22,8 @@
     "clean": "rm -rf dist",
     "package": "mkdir -p dist && find dist -name '*.map' -delete && zip -r dist/$npm_package_name-$npm_package_version.zip manifest.json dist/ README.md -x '*.map'",
     "bundle": "pnpm clean && pnpm build && pnpm package",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "lint": "tsc --noEmit",
     "type-check": "tsc --noEmit"
   },
@@ -49,9 +57,14 @@
     "vite": "^7.1.5",
     "vitest": "^4.1.10"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild"
-    ]
-  }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlexanderBabel/wealthfolio-skatt.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AlexanderBabel/wealthfolio-skatt/issues"
+  },
+  "homepage": "https://github.com/AlexanderBabel/wealthfolio-skatt#readme",
+  "author": "Alex Babel",
+  "packageManager": "pnpm@11.23.0"
 }

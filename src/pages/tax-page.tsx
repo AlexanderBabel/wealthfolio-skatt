@@ -43,7 +43,7 @@ import {
   TabsTrigger,
   formatAmount,
 } from '@wealthfolio/ui';
-import { Download, Landmark, RefreshCw } from 'lucide-react';
+import { Bitcoin, Download, Landmark, RefreshCw } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import {
   loadFilerInfo,
@@ -63,6 +63,7 @@ import {
   type FilerInfo,
 } from '../lib/sru';
 import {
+  detailK4,
   summarizeK4,
   type FundHoldingRow,
   type K4Row,
@@ -75,6 +76,7 @@ import {
 const WRAPPER_LABELS: Record<Wrapper, string> = {
   ISK: 'ISK',
   DEPA: 'Depå',
+  CRYPTO: 'Crypto',
   IGNORE: 'Not taxed here',
 };
 
@@ -371,20 +373,24 @@ function k4Csv(rows: K4Summary[]): string {
   return lines.join('\r\n');
 }
 
-const EMPTY_FILER: FilerInfo = { personnummer: '', name: '' };
+const EMPTY_FILER: FilerInfo = { personnummer: '', name: '', postnr: '', postort: '' };
 
 /**
- * Collects the personnummer/name INFO.SRU needs - not part of Wealthfolio's
- * own data - and saves it for next time, then writes INFO.SRU and
+ * Collects the four identity fields INFO.SRU's MEDIELEV block requires - none
+ * of them part of Wealthfolio's own data - and saves them for next time, then
+ * writes INFO.SRU and
  * BLANKETTER.SRU via the host's save dialog.
  */
 function SruExportDialog({
   ctx,
   k4Summary,
+  cryptoRows,
   year,
 }: {
   ctx: AddonContext;
   k4Summary: K4Summary[];
+  /** Avsnitt D. Rides along on the same blanketter as avsnitt A. */
+  cryptoRows: K4Summary[];
   year: number;
 }) {
   const queryClient = useQueryClient();
@@ -426,7 +432,7 @@ function SruExportDialog({
       // The exact name BLANKETTER.SRU matters - Skatteverket's service
       // rejects a renamed duplicate such as "blanketter (1).sru".
       await ctx.api.files.openSaveDialog(
-        buildBlanketterSru(k4Summary, next, year, new Date()),
+        buildBlanketterSru(k4Summary, next, year, new Date(), cryptoRows),
         'BLANKETTER.SRU',
       );
     },
@@ -461,7 +467,7 @@ function SruExportDialog({
         <DialogHeader>
           <DialogTitle>Export for Skatteverket</DialogTitle>
           <DialogDescription>
-            Generates INFO.SRU and BLANKETTER.SRU for K4 avsnitt A. Skatteverket&apos;s e-service
+            Generates INFO.SRU and BLANKETTER.SRU for K4 avsnitt A{cryptoRows.length > 0 ? ' and avsnitt D (crypto)' : ''}. Skatteverket&apos;s e-service
             wants the two files uploaded separately, not zipped together, with those exact names —
             save them to the same folder and upload both. Saved here so this only has to be typed
             once.
@@ -489,7 +495,7 @@ function SruExportDialog({
               <Label htmlFor="sru-postnr">Postnummer</Label>
               <Input
                 id="sru-postnr"
-                value={filer.postnr ?? ''}
+                value={filer.postnr}
                 onChange={(e) => set({ postnr: e.target.value })}
               />
             </div>
@@ -497,7 +503,7 @@ function SruExportDialog({
               <Label htmlFor="sru-postort">Postort</Label>
               <Input
                 id="sru-postort"
-                value={filer.postort ?? ''}
+                value={filer.postort}
                 onChange={(e) => set({ postort: e.target.value })}
               />
             </div>
@@ -547,14 +553,18 @@ function DepaTab({
   ctx,
   result,
   currency,
+  cryptoDetail,
 }: {
   ctx: AddonContext;
   result: TaxYearResult;
   currency: string;
+  /** Only to keep the SRU written here identical to the one written on the Crypto tab. */
+  cryptoDetail: boolean;
 }) {
   const { depa } = result;
   const schablonWins = depa.rows.filter((r) => r.schablonBetter);
   const k4Summary = summarizeK4(depa.rows);
+  const cryptoRows = cryptoDetail ? detailK4(result.crypto.rows) : summarizeK4(result.crypto.rows);
 
   const totalCapitalIncome =
     depa.deductibleResult + depa.dividends + depa.interest + depa.fundSchablonintakt;
@@ -617,7 +627,12 @@ function DepaTab({
                 <Download className="mr-2 h-4 w-4" />
                 Export CSV
               </Button>
-              <SruExportDialog ctx={ctx} k4Summary={k4Summary} year={result.year} />
+              <SruExportDialog
+                ctx={ctx}
+                k4Summary={k4Summary}
+                cryptoRows={cryptoRows}
+                year={result.year}
+              />
             </div>
           </div>
           <Table>
@@ -682,6 +697,158 @@ function DepaTab({
           </AlertDescription>
         </Alert>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * K4 avsnitt D. Crypto is an "annan tillgang", not a delagarratt, so three
+ * things differ from the Depa tab: its own average-cost pool per coin, no
+ * schablonmetoden, and losses that count at 70 % without netting against
+ * gains first.
+ */
+function CryptoTab({
+  ctx,
+  result,
+  currency,
+  detail,
+  onDetailChange,
+}: {
+  ctx: AddonContext;
+  result: TaxYearResult;
+  currency: string;
+  /** True: one K4 row per disposal. False: one per coin per year. */
+  detail: boolean;
+  onDetailChange: (detail: boolean) => void;
+}) {
+  const { crypto, depa } = result;
+  const k4Summary = summarizeK4(depa.rows);
+  const cryptoRows = detail ? detailK4(crypto.rows) : summarizeK4(crypto.rows);
+
+  const totalCapitalIncome = crypto.deductibleResult + crypto.rewards;
+
+  const summary: Array<[string, number, string?]> = [
+    ['Gains', crypto.gains, 'taxed in full'],
+    ['Losses', -crypto.losses, 'deductible at 70 %'],
+    ['Rewards', crypto.rewards, 'staking, earn and airdrops — taxed on receipt'],
+    ['Total capital income', totalCapitalIncome],
+  ];
+
+  const exportCsv = async () => {
+    try {
+      await ctx.api.files.openSaveDialog(k4Csv(cryptoRows), `K4-avsnitt-D-${result.year}.csv`);
+    } catch (error) {
+      ctx.api.toast.error(
+        `Could not save the file: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">
+        Crypto goes in K4 avsnitt D. Every sale, and every swap of one coin for another, is a
+        disposal — the average cost is pooled per coin across every crypto account. Two rules
+        differ from shares: schablonmetoden (the 20 % fallback) does not apply here, and a loss
+        does not offset a gain in full. A +10 000 and a −10 000 in the same year still leave
+        3 000 to be taxed, because only 70 % of the loss counts.
+      </p>
+
+      <div className="grid grid-cols-2 gap-x-6 gap-y-4 rounded-lg border p-4 sm:grid-cols-4">
+        {summary.map(([label, value, hint], index) => (
+          <div key={label} className={index === summary.length - 1 ? 'font-medium' : undefined}>
+            <div className="text-xs text-muted-foreground">{label}</div>
+            <div className={`text-lg tabular-nums ${value < 0 ? 'text-destructive' : ''}`}>
+              <Money value={value} currency={currency} />
+            </div>
+            {hint ? <div className="text-xs text-muted-foreground">{hint}</div> : null}
+          </div>
+        ))}
+      </div>
+
+      {crypto.rows.length === 0 ? (
+        <p className="py-8 text-center text-sm text-muted-foreground">
+          No crypto disposals in {result.year} from an account classified as Crypto.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-4">
+            <p className="text-sm text-muted-foreground">
+              Every disposal in {result.year} — a sale, or a coin swapped for another coin.
+            </p>
+            <div className="flex shrink-0 items-center gap-2">
+              <Select
+                value={detail ? 'detail' : 'summary'}
+                onValueChange={(value) => onDetailChange(value === 'detail')}
+              >
+                <SelectTrigger className="w-[220px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="detail">One K4 row per disposal</SelectItem>
+                  <SelectItem value="summary">One K4 row per coin</SelectItem>
+                </SelectContent>
+              </Select>
+              <Button variant="outline" size="sm" onClick={exportCsv}>
+                <Download className="mr-2 h-4 w-4" />
+                Export CSV
+              </Button>
+              <SruExportDialog
+                ctx={ctx}
+                k4Summary={k4Summary}
+                cryptoRows={cryptoRows}
+                year={result.year}
+              />
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Skatteverket asks for one row per disposal for crypto; one row per coin is the
+            compact form. The choice applies to the CSV and to avsnitt D in the SRU export.
+            {cryptoRows.length} row(s) either way will be written.
+          </p>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Date</TableHead>
+                <TableHead>Coin</TableHead>
+                <TableHead>Account</TableHead>
+                <TableHead className="text-right">Quantity</TableHead>
+                <TableHead className="text-right">Proceeds</TableHead>
+                <TableHead className="text-right">Cost basis</TableHead>
+                <TableHead className="text-right">Result</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {crypto.rows.map((row: K4Row, index) => (
+                <TableRow key={`${row.date}-${row.symbol}-${index}`}>
+                  <TableCell className="text-muted-foreground">{row.date}</TableCell>
+                  <TableCell>
+                    <span className="font-medium">{row.symbol}</span>
+                    {row.note ? (
+                      <Badge variant="warning" className="ml-2">
+                        {row.note}
+                      </Badge>
+                    ) : null}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">{row.account}</TableCell>
+                  <TableCell className="text-right tabular-nums">{row.quantity}</TableCell>
+                  <TableCell className="text-right">
+                    <Money value={row.forsaljningspris} currency={currency} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Money value={row.omkostnadsbelopp} currency={currency} />
+                  </TableCell>
+                  <TableCell
+                    className={`text-right font-medium ${row.result < 0 ? 'text-destructive' : ''}`}
+                  >
+                    <Money value={row.result} currency={currency} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
     </div>
   );
 }
@@ -768,6 +935,9 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
   // of the screen mid-way, so leaving is an explicit click.
   const noneClassified = !!data && !Object.values(data.wrappers).some((w) => w !== 'IGNORE');
   const [dismissed, setDismissed] = useState(false);
+  // Lives here, not in CryptoTab: the SRU export is offered on both tabs and
+  // has to write the same avsnitt D either way.
+  const [cryptoDetail, setCryptoDetail] = useState(true);
   const startedEmpty = useRef(false);
   if (noneClassified) startedEmpty.current = true;
   const showOnboarding = !dismissed && (noneClassified || startedEmpty.current);
@@ -908,13 +1078,31 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
               <TabsList>
                 <TabsTrigger value="isk">ISK</TabsTrigger>
                 <TabsTrigger value="depa">Depå</TabsTrigger>
+                <TabsTrigger value="crypto">
+                  <Bitcoin className="mr-1.5 h-3.5 w-3.5" />
+                  Crypto
+                </TabsTrigger>
                 <TabsTrigger value="accounts">Accounts</TabsTrigger>
               </TabsList>
               <TabsContent value="isk" className="pt-4">
                 <IskTab result={view.result} currency={currency} />
               </TabsContent>
               <TabsContent value="depa" className="pt-4">
-                <DepaTab ctx={ctx} result={view.result} currency={currency} />
+                <DepaTab
+                  ctx={ctx}
+                  result={view.result}
+                  currency={currency}
+                  cryptoDetail={cryptoDetail}
+                />
+              </TabsContent>
+              <TabsContent value="crypto" className="pt-4">
+                <CryptoTab
+                  ctx={ctx}
+                  result={view.result}
+                  currency={currency}
+                  detail={cryptoDetail}
+                  onDetailChange={setCryptoDetail}
+                />
               </TabsContent>
               <TabsContent value="accounts" className="pt-4">
                 {accountsTab}
