@@ -52,6 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule is testable without React. Tests moved next to the code they cover.
 - `noUnusedLocals`, `noUnusedParameters` and `noFallthroughCasesInSwitch` are on, so CI fails
   on dead imports rather than accumulating them.
+- Tests run pinned to `Europe/Stockholm`. A Swedish tax year is a local calendar year, so the
+  date handling is timezone dependent by nature — a trade at 22:00Z on 31 May is a 1 June trade
+  in Stockholm, and a CI runner on UTC was reading it as May.
 - Renamed the internal table heading component to `SectionHeading`; it had been shadowing the
   UI kit's own `TableCaption` export.
 
