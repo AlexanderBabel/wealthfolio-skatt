@@ -188,3 +188,4 @@ describe('buildBlanketterSru', () => {
     expect(sru).toContain('#UPPGIFT 7014 1');
   });
 });
+

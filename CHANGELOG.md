@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.2] - 2026-08-25
+## [1.1.0] - 2026-08-25
 
 ### Fixed
 - Classifying an account did nothing visible. The dropdown was bound to the portfolio
@@ -18,7 +18,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Changing several accounts in a row no longer races.
 
 ### Changed
+- **One export, in one place.** The Skatteverket export moved out of the Depå and Crypto
+  tabs into the page header. There was only ever one K4 — avsnitt A and D share the same
+  blanketter in a single `BLANKETTER.SRU` — but offering the button on two tabs implied
+  two filings. The dialog now states what it is about to write: rows per section, and
+  how many blanketter that comes to.
+- The crypto row-granularity choice (per disposal or per coin) moved into that dialog,
+  next to the file it actually affects. The Crypto tab's CSV always mirrors its table.
+- An empty avsnitt D now says so, and points at the Accounts tab, instead of silently
+  exporting a K4 with only the depå rows in it.
 - Dropped the bitcoin icon from the Crypto tab; it now matches the other tab labels.
+
+### Added
+- **Dividends and interest** are now listed on the Depå tab, and **staking, earn and airdrop
+  rewards** on the Crypto tab — one row per payment behind each summary figure, rather than
+  only the total.
+- Every table now carries a caption saying what it is and where its figures come from.
+- Account classification is staged: set several accounts, then **Save and re-read portfolio**
+  once. Unsaved rows are marked, and the previous read is cancelled before a new one starts,
+  so the progress bar no longer jumps backwards when two reads overlap.
+- Re-reading the portfolio after an account change shows the progress bar again and puts
+  the four summary cards into a skeleton state, rather than leaving stale figures on
+  screen looking settled.
+- `buildCryptoEvents` is now a pure exported function with its own tests, covering swap
+  pairing against a same-day reward drip, own-wallet moves, and untraceable transfers out.
+
+### Changed
+- Split the two files that had grown to hold most of the addon. `tax-page.tsx` went from
+  1 400 lines to a 250-line composition root, with each tab, the export dialog and the shared
+  presentational pieces in their own module; the data hook split into the portfolio read and
+  the per-year computation. `buildCryptoEvents`, the date and activity helpers and addon
+  storage moved to `lib/`, which now imports nothing from `hooks/` or `pages/` — so every tax
+  rule is testable without React. Tests moved next to the code they cover.
+- `noUnusedLocals`, `noUnusedParameters` and `noFallthroughCasesInSwitch` are on, so CI fails
+  on dead imports rather than accumulating them.
+- Renamed the internal table heading component to `SectionHeading`; it had been shadowing the
+  UI kit's own `TableCaption` export.
+
+### Security
+- Test fixtures and code comments no longer carry real tickers, amounts or account names, and
+  the contributing notes now require fixtures to be synthetic. Nothing beyond a single vendor
+  name in one comment had reached the public repository.
 
 ## [1.0.1] - 2026-08-25
 

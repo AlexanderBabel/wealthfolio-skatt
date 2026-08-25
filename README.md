@@ -55,7 +55,12 @@ writes go where you point the save dialog.
 
 1. Open **Skatt** in the sidebar and go to the **Accounts** tab.
 2. Mark each account as **ISK**, **Depå**, **Crypto**, or leave it as *Not taxed here*.
-3. Pick a year. That is the whole setup.
+3. Click **Save and re-read portfolio**. Changes are staged until you do, so you can set every
+   account first and pay for the re-read once.
+4. Pick a year. That is the whole setup.
+
+An account left as *Not taxed here* contributes nothing — no disposals, no dividends, no
+schablonintäkt. If a tab looks emptier than you expect, that is the first thing to check.
 
 The tabs then show each wrapper's figures, the disposals behind them, and the combined
 kapitalöverskott with the tax or refund it produces.
@@ -276,13 +281,41 @@ pnpm type-check
 pnpm bundle         # installable zip in dist/
 ```
 
-The tax rules live in [`src/lib/swedish-tax.ts`](src/lib/swedish-tax.ts) and are pure functions
-over SEK amounts — no host API, no React. Everything that reads Wealthfolio is in
-[`src/hooks/use-tax-year.ts`](src/hooks/use-tax-year.ts). If you are checking the maths, the
-first file and its tests are the whole story.
+### Layout
+
+The rule that decides where a thing goes: **`lib/` may not import from `hooks/` or `pages/`.**
+Everything that is a tax rule is therefore a pure function over SEK amounts, testable without a
+React renderer or a running Wealthfolio — which is why the test suite needs neither.
+
+```
+src/
+  lib/          pure logic, no host API and no React
+    swedish-tax.ts    the rules: schablonintäkt, genomsnittsmetoden, avsnitt D
+    crypto-events.ts  activities -> K4 avsnitt D events (swaps, rewards)
+    sru.ts            INFO.SRU / BLANKETTER.SRU writers, Skatteverket field codes
+    csv.ts, dates.ts, activities.ts, storage.ts
+  hooks/        everything that reads Wealthfolio
+    use-tax-data.ts   the slow portfolio read, cached and cancellable
+    use-tax-year.ts   one year's activities -> the inputs swedish-tax.ts wants
+  components/   presentational pieces shared across tabs
+  pages/
+    tax-page.tsx      composition root: year picker, export, tabs
+    tabs/             one file per tab
+```
+
+If you are checking the maths, [`src/lib/swedish-tax.ts`](src/lib/swedish-tax.ts) and its tests
+are the whole story. Tests sit next to the file they cover.
+
+> [!IMPORTANT]
+> **Test fixtures must be synthetic.** This is a public repository, so no test, comment or doc
+> may carry anyone's real tickers, quantities, account names or personnummer — a fixture copied
+> out of a live portfolio publishes that portfolio. Use placeholder tickers (`AAA`, `BBB`),
+> a placeholder venue (`Exchange`, `Broker`) and round numbers. The *shape* is what the tests
+> are for; the real values add nothing and cannot be taken back once pushed.
 
 Bug reports are most useful with the warning text the addon showed you and the shape of the
-activities behind it. Please do not paste real personnummer or account numbers into an issue.
+activities behind it. Please do not paste real personnummer, account names or holdings into an
+issue — describe the shape instead.
 
 ### Releasing
 

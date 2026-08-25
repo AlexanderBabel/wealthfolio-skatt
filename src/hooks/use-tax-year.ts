@@ -1,376 +1,20 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type {
-  Account,
-  AccountValuation,
-  ActivityDetails,
-  AddonContext,
-  Asset,
-  Holding,
-  Quote,
-} from '@wealthfolio/addon-sdk';
-import { useEffect, useMemo } from 'react';
-import type { FilerInfo } from '../lib/sru';
+import type { ActivityDetails } from '@wealthfolio/addon-sdk';
+import { useMemo } from 'react';
+import { amountOf, quantityOf } from '../lib/activities';
+import { buildCryptoEvents } from '../lib/crypto-events';
+import { day, today } from '../lib/dates';
 import {
   computeTaxYear,
   quantityBefore,
   type FundHolding,
+  type IncomeRow,
   type IskAccount,
   type SecurityEvent,
   type TaxYearResult,
   type Warning,
   type Wrapper,
 } from '../lib/swedish-tax';
-
-/**
- * Wealthfolio's own "Instrument Type" taxonomy (source: AUTO) is a far more
- * reliable fund/ETF signal than the market data provider's raw instrumentType
- * - it correctly tags Xetra-listed UCITS ETFs that the provider field leaves
- * blank. ETN and ETC are debt/commodity notes, not investeringsfonder, so
- * they are deliberately left out even though Wealthfolio groups them nearby.
- */
-const FUND_INSTRUMENT_KEYS = new Set(['ETF', 'FUND', 'FUND_MUTUAL', 'FUND_FOF']);
-
-/**
- * Neither Wealthfolio's own taxonomy nor the market data provider classifies
- * a position that has since been sold out entirely - both only look at
- * currently-open holdings. UCITS is a regulatory label almost never seen
- * outside a fund's own name, so it is a reliable last resort for exactly the
- * case that matters here: a fund held on 1 January and gone by the time the
- * addon runs.
- */
-const FUND_NAME_PATTERN = /UCITS|\bETF\b|\bFUND\b|\bFOND(EN)?\b/i;
-
-export const WRAPPERS_KEY = 'account-wrappers';
-
-export type WrapperMap = Record<string, Wrapper>;
-
-export async function loadWrappers(ctx: AddonContext): Promise<WrapperMap> {
-  const raw = await ctx.api.storage.get(WRAPPERS_KEY);
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as WrapperMap;
-  } catch {
-    ctx.api.logger.error('Stored account classification is not valid JSON, ignoring it.');
-    return {};
-  }
-}
-
-export async function saveWrappers(ctx: AddonContext, wrappers: WrapperMap): Promise<void> {
-  await ctx.api.storage.set(WRAPPERS_KEY, JSON.stringify(wrappers));
-}
-
-/**
- * The wrapper map on its own, as a cheap storage read.
- *
- * `useTaxData` also loads it, but that query re-reads the whole portfolio and
- * takes seconds. Binding the Accounts dropdown to this one instead means a
- * selection shows up immediately rather than snapping back to the old value
- * until the portfolio finishes reloading behind it.
- */
-export function useWrappers(ctx: AddonContext) {
-  return useQuery<WrapperMap>({
-    queryKey: ['skatt', 'wrappers'],
-    queryFn: () => loadWrappers(ctx),
-    staleTime: Infinity,
-    refetchOnWindowFocus: false,
-  });
-}
-
-export const FILER_INFO_KEY = 'sru-filer-info';
-
-/** Personnummer and the rest of INFO.SRU's identity block, kept for next time. */
-export async function loadFilerInfo(ctx: AddonContext): Promise<FilerInfo | null> {
-  const raw = await ctx.api.storage.get(FILER_INFO_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as FilerInfo;
-  } catch {
-    ctx.api.logger.error('Stored SRU filer info is not valid JSON, ignoring it.');
-    return null;
-  }
-}
-
-export async function saveFilerInfo(ctx: AddonContext, filer: FilerInfo): Promise<void> {
-  await ctx.api.storage.set(FILER_INFO_KEY, JSON.stringify(filer));
-}
-
-interface Series {
-  /** Valuations ascending by date. */
-  points: AccountValuation[];
-  baseCurrency: string;
-}
-
-interface RatePoint {
-  date: string;
-  /** Foreign currency to base currency on that date. */
-  rate: number;
-}
-
-interface AssetInfo {
-  currency: string;
-  /** True when Wealthfolio's own instrument-type taxonomy - or, failing that, the
-   *  market data provider's instrumentType - looks like a fund or ETF. */
-  isFund: boolean;
-  /** False when neither source classified the instrument at all - isFund is then a guess. */
-  typeKnown: boolean;
-  /** Human label for the detected type, e.g. "ETF" or "Mutual Fund". */
-  typeLabel?: string;
-  /** Close prices ascending by date, for valuing the holding at 1 January. */
-  quotes: { date: string; close: number }[];
-}
-
-interface TaxData {
-  accounts: Account[];
-  wrappers: WrapperMap;
-  activities: ActivityDetails[];
-  series: Record<string, Series>;
-  baseCurrency: string;
-  /** Daily rate history to base currency, keyed by the foreign currency. */
-  rates: Record<string, RatePoint[]>;
-  /** One entry per symbol ever held in a depa account - for the fund schablonintakt. */
-  assets: Record<string, AssetInfo>;
-  years: number[];
-}
-
-const pad = (n: number) => String(n).padStart(2, '0');
-
-/**
- * YYYY-MM-DD in the local calendar, which is the one a Swedish tax year is
- * counted in. Timestamps come back as the instant of local midnight, so a
- * trade on 18 July is stored as `2022-07-17T22:00:00Z` in summer - reading
- * that in UTC would file it a day early, and on 1 January, a year early.
- */
-export const day = (d: Date | string): string => {
-  if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-  const date = typeof d === 'string' ? new Date(d) : d;
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-};
-
-const today = (): string => day(new Date());
-const amountOf = (a: ActivityDetails) => Number(a.amount ?? 0) || 0;
-const quantityOf = (a: ActivityDetails) => Number(a.quantity ?? 0) || 0;
-
-/** Latest valuation on or before `date`, or undefined when the series starts later. */
-function valuationAt(series: Series | undefined, date: string): AccountValuation | undefined {
-  if (!series) return undefined;
-  let found: AccountValuation | undefined;
-  for (const p of series.points) {
-    if (day(p.valuationDate) > date) break;
-    found = p;
-  }
-  return found;
-}
-
-export interface LoadProgress {
-  /** 0..1 */
-  fraction: number;
-  label: string;
-}
-
-export function useTaxData(ctx: AddonContext, onProgress?: (progress: LoadProgress) => void) {
-  const queryClient = useQueryClient();
-
-  // Re-reading the portfolio is the slow part, so the result is kept for a
-  // full day - but a full day is a ceiling, not the real signal. Wealthfolio
-  // itself knows the moment a trade, edit or import changes the portfolio,
-  // and tells every addon via this event, so the cache is invalidated then
-  // rather than waited out.
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    ctx.api.events.portfolio
-      .onUpdateComplete(() => queryClient.invalidateQueries({ queryKey: ['skatt', 'data'] }))
-      .then((fn) => {
-        if (cancelled) fn();
-        else unlisten = fn;
-      })
-      .catch((error: unknown) =>
-        ctx.api.logger.error(`Could not listen for portfolio updates: ${String(error)}`),
-      );
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [ctx, queryClient]);
-
-  return useQuery<TaxData>({
-    queryKey: ['skatt', 'data'],
-    staleTime: 24 * 60 * 60 * 1000,
-    refetchOnWindowFocus: false,
-    queryFn: async () => {
-      onProgress?.({ fraction: 0.02, label: 'Reading accounts and activities…' });
-      const [accounts, wrappers, activities, exchangeRates] = await Promise.all([
-        ctx.api.accounts.getAll(),
-        loadWrappers(ctx),
-        ctx.api.activities.getAll(),
-        ctx.api.exchangeRates.getAll().catch(() => []),
-      ]);
-
-      const tracked = accounts.filter((a) => (wrappers[a.id] ?? 'IGNORE') !== 'IGNORE');
-      const firstDate = activities.reduce(
-        (min, a) => (day(a.date) < min ? day(a.date) : min),
-        today(),
-      );
-      const start = `${Number(firstDate.slice(0, 4)) - 1}-12-01`;
-      const end = today();
-
-      const depaAccountIds = new Set(
-        accounts.filter((a) => (wrappers[a.id] ?? 'IGNORE') === 'DEPA').map((a) => a.id),
-      );
-      const depaAssetIds = new Map<string, string>();
-      const depaAssetNames = new Map<string, string>();
-      for (const a of activities) {
-        if (!depaAccountIds.has(a.accountId)) continue;
-        if (!depaAssetIds.has(a.assetSymbol)) depaAssetIds.set(a.assetSymbol, a.assetId);
-        if (a.assetName && !depaAssetNames.has(a.assetSymbol)) {
-          depaAssetNames.set(a.assetSymbol, a.assetName);
-        }
-      }
-      // Progress is one tick per network round trip below - not exact (the base
-      // currency, and so the real exchange-rate count, is not known yet), but it
-      // moves in step with the slow part: one call per account and per symbol.
-      const totalTicks =
-        tracked.length + depaAccountIds.size + depaAssetIds.size + exchangeRates.length;
-      let doneTicks = 0;
-      const tick = (label: string) => {
-        doneTicks += 1;
-        onProgress?.({ fraction: 0.05 + 0.95 * (totalTicks > 0 ? doneTicks / totalTicks : 1), label });
-      };
-
-      const series: Record<string, Series> = {};
-      await Promise.all(
-        tracked.map(async (account) => {
-          // One account without valuations must not blank the whole page - the
-          // quarters simply come out unknown, which the year already reports.
-          const points = await ctx.api.portfolio
-            .getHistoricalValuations(account.id, start, end)
-            .catch((error: unknown) => {
-              ctx.api.logger.error(`No valuations for ${account.name}: ${String(error)}`);
-              return [] as AccountValuation[];
-            });
-          series[account.id] = {
-            points: [...points].sort((a, b) => day(a.valuationDate).localeCompare(day(b.valuationDate))),
-            baseCurrency: points[0]?.baseCurrency ?? 'SEK',
-          };
-          tick(`Reading valuations for ${account.name}…`);
-        }),
-      );
-
-      const base = Object.values(series)[0]?.baseCurrency ?? 'SEK';
-
-      // Wealthfolio's own instrument-type taxonomy is only available for
-      // currently-held positions, but that covers the common case; a symbol
-      // sold out entirely falls back to the market data provider below.
-      const holdingsBySymbol = new Map<string, Holding>();
-      await Promise.all(
-        [...depaAccountIds].map(async (accountId) => {
-          const holdings = await ctx.api.portfolio.getHoldings(accountId).catch(() => [] as Holding[]);
-          for (const h of holdings) {
-            if (h.instrument?.symbol && !holdingsBySymbol.has(h.instrument.symbol)) {
-              holdingsBySymbol.set(h.instrument.symbol, h);
-            }
-          }
-          tick('Reading fund/ETF classifications…');
-        }),
-      );
-
-      const assets: Record<string, AssetInfo> = {};
-      await Promise.all(
-        [...depaAssetIds].map(async ([symbol, assetId]) => {
-          const holding = holdingsBySymbol.get(symbol);
-          const category = holding?.instrument?.classifications?.assetType;
-          // The fallback only fires for a symbol Wealthfolio never classified -
-          // typically one fully sold before now, absent from current holdings.
-          const profile: Asset | null = category
-            ? null
-            : await ctx.api.assets.getProfile(assetId).catch(() => null);
-          const history = await ctx.api.quotes.getHistory(assetId).catch(() => [] as Quote[]);
-
-          const rawCurrency = holding?.instrument?.currency ?? profile?.quoteCcy ?? base;
-          // GBp/GBX quotes are pence, a hundredth of the GBP the FX history is
-          // kept in - the same quirk rateOn corrects for below.
-          const pence = rawCurrency === 'GBp' || rawCurrency === 'GBX';
-
-          // The security's own name is checked unconditionally, not just when
-          // the two sources above are silent - a data provider that has never
-          // heard of a Xetra-listed UCITS ETF often tags it "EQUITY" rather
-          // than leaving the field blank, which would otherwise block this
-          // check from ever running. "UCITS" and "ETF" are not names a stock
-          // carries, so a hit here is trusted as much as an explicit type.
-          // Wealthfolio's own classification is the one signal reliable enough
-          // to also rule a fund OUT, since it is confirmed correct against a
-          // real holding - unless it could not classify the asset at all.
-          const nameMatch = FUND_NAME_PATTERN.test(depaAssetNames.get(symbol) ?? '');
-          const providerMatch = /ETF|FUND/i.test(profile?.instrumentType ?? '');
-          const categoryKnown = !!category && category.key !== 'OTHER_UNKNOWN';
-
-          assets[symbol] = {
-            currency: pence ? 'GBP' : rawCurrency,
-            isFund: categoryKnown ? FUND_INSTRUMENT_KEYS.has(category!.key) : providerMatch || nameMatch,
-            typeKnown: categoryKnown || !!profile?.instrumentType || nameMatch,
-            typeLabel: categoryKnown
-              ? category!.name
-              : providerMatch
-                ? profile!.instrumentType!
-                : nameMatch
-                  ? 'Fund/ETF, by name'
-                  : (profile?.instrumentType ?? undefined),
-            quotes: history
-              .filter((q) => q.close > 0)
-              .map((q) => ({ date: day(q.timestamp), close: pence ? q.close / 100 : q.close }))
-              .sort((a, b) => a.date.localeCompare(b.date)),
-          };
-          tick(`Pricing ${symbol}…`);
-        }),
-      );
-
-      // An exchange rate's id is the asset its quotes are stored under, so the
-      // quote history of that asset is the daily rate series. That is what a
-      // 2019 trade has to be converted with - not today's rate.
-      const rates: Record<string, RatePoint[]> = {};
-      await Promise.all(
-        exchangeRates
-          .filter((r) => r.toCurrency === base || r.fromCurrency === base)
-          .map(async (r) => {
-            const foreign = r.toCurrency === base ? r.fromCurrency : r.toCurrency;
-            const invert = r.fromCurrency === base;
-            const history = await ctx.api.quotes.getHistory(r.id).catch(() => [] as Quote[]);
-
-            const points: RatePoint[] = history
-              .filter((q) => q.close > 0)
-              .map((q) => ({ date: day(q.timestamp), rate: invert ? 1 / q.close : q.close }))
-              .sort((a, b) => a.date.localeCompare(b.date));
-
-            // The current rate closes the gap between the last quote and today.
-            if (r.rate > 0) points.push({ date: today(), rate: invert ? 1 / r.rate : r.rate });
-            if (points.length > 0) rates[foreign] = points;
-            tick(`Reading ${foreign} exchange rates…`);
-          }),
-      );
-
-      const thisYear = new Date().getFullYear();
-      const firstYear = Number(firstDate.slice(0, 4));
-      const years: number[] = [];
-      for (let y = thisYear; y >= firstYear; y--) years.push(y);
-
-      // Some ticks above are skipped (an exchange rate not in the base
-      // currency never fires one), so the count alone will not always reach
-      // 1 - closing it out here keeps the bar from stalling short of done.
-      onProgress?.({ fraction: 1, label: 'Done' });
-
-      return {
-        accounts,
-        wrappers,
-        activities,
-        series,
-        baseCurrency: base,
-        rates,
-        assets,
-        years: years.length > 0 ? years : [thisYear],
-      };
-    },
-  });
-}
+import { FUND_NAME_PATTERN, valuationAt, type TaxData } from './use-tax-data';
 
 export interface TaxYearView {
   result?: TaxYearResult;
@@ -624,150 +268,18 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
     const cryptoIds = new Set(
       data.accounts.filter((a) => wrapperOf(a.id) === 'CRYPTO').map((a) => a.id),
     );
-    const cryptoActivities = data.activities.filter((a) => cryptoIds.has(a.accountId));
-
-    /**
-     * A crypto-to-crypto swap arrives as a transfer out of one coin and a
-     * transfer in of another, same account, same day - Crypto.com books a
-     * "convert" and a token rebrand identically. Several transfers can land on
-     * the same day (a monthly reward drip alongside a real swap), so each
-     * outgoing leg takes the incoming leg closest to it in value rather than
-     * whichever the list happens to hold first.
-     */
-    const swapFor = new Map<string, ActivityDetails>();
-    const swapLegIn = new Set<string>();
-    const cryptoByDay = new Map<string, ActivityDetails[]>();
-    for (const a of cryptoActivities) {
-      if (a.activityType !== 'TRANSFER_IN' && a.activityType !== 'TRANSFER_OUT') continue;
-      const key = `${a.accountId}|${day(a.date)}`;
-      cryptoByDay.set(key, [...(cryptoByDay.get(key) ?? []), a]);
-    }
-    for (const group of cryptoByDay.values()) {
-      const available = group.filter((a) => a.activityType === 'TRANSFER_IN');
-      for (const out of group.filter((a) => a.activityType === 'TRANSFER_OUT')) {
-        const outSek = toSek(out);
-        let best: ActivityDetails | undefined;
-        let bestGap = Infinity;
-        for (const candidate of available) {
-          if (candidate.assetSymbol === out.assetSymbol) continue;
-          if (swapLegIn.has(candidate.id)) continue;
-          const gap = Math.abs(toSek(candidate) - outSek);
-          if (gap < bestGap) {
-            best = candidate;
-            bestGap = gap;
-          }
-        }
-        if (best) {
-          swapFor.set(out.id, best);
-          swapLegIn.add(best.id);
-        }
-      }
-    }
-
-    const cryptoEvents: SecurityEvent[] = [];
-    let cryptoRewardsSek = 0;
-
-    for (const a of cryptoActivities) {
-      const base = {
-        date: day(a.date),
-        symbol: a.assetSymbol,
-        name: a.assetName,
-        account: a.accountName,
-      };
-      const fee = Number(a.fee ?? 0) || 0;
-      const feeSek = fee ? toSek({ ...a, amount: String(fee) }) : 0;
-
-      switch (a.activityType) {
-        case 'BUY':
-          cryptoEvents.push({
-            ...base,
-            kind: 'ACQUIRE',
-            quantity: quantityOf(a),
-            amountSek: toSek(a) + feeSek,
-          });
-          break;
-        case 'SELL':
-          cryptoEvents.push({
-            ...base,
-            kind: 'DISPOSE',
-            quantity: quantityOf(a),
-            amountSek: toSek(a) - feeSek,
-          });
-          break;
-        case 'TRANSFER_IN': {
-          const rebooked = rebookedWith(a);
-          if (rebooked) {
-            cryptoEvents.push({
-              ...base,
-              kind: 'REBOOK',
-              quantity: quantityOf(a),
-              replacedQuantity: quantityOf(rebooked),
-              amountSek: 0,
-            });
-            break;
-          }
-          // Moving a coin between two of your own wallets is not an
-          // acquisition - the pooled average cost already carries across.
-          if (landsIn(a) === 'CRYPTO') break;
-
-          if (swapLegIn.has(a.id)) {
-            // The coin received in a swap. Its omkostnadsbelopp is what it was
-            // worth when it arrived, which is also the disposal value booked
-            // on the outgoing leg below.
-            cryptoEvents.push({
-              ...base,
-              kind: 'ACQUIRE',
-              quantity: quantityOf(a),
-              amountSek: toSek(a),
-            });
-            break;
-          }
-
-          // Nothing left it could have come from: a staking, earn or airdrop
-          // reward. Taxed as capital income the year it lands, and that same
-          // value becomes the coin's omkostnadsbelopp.
-          const valueSek = toSek(a);
-          if (day(a.date).slice(0, 4) === String(year)) cryptoRewardsSek += valueSek;
-          cryptoEvents.push({
-            ...base,
-            kind: 'ACQUIRE',
-            quantity: quantityOf(a),
-            amountSek: valueSek,
-          });
-          break;
-        }
-        case 'TRANSFER_OUT': {
-          if (rebookedWith(a)) break;
-          if (landsIn(a) === 'CRYPTO') break;
-
-          const received = swapFor.get(a.id);
-          if (received) {
-            // Forsaljningspriset is the market value of what you got in
-            // exchange, not what the coin you gave up was quoted at.
-            cryptoEvents.push({
-              ...base,
-              kind: 'DISPOSE',
-              quantity: quantityOf(a),
-              amountSek: toSek(received),
-            });
-            break;
-          }
-
-          cryptoEvents.push({ ...base, kind: 'REMOVE', quantity: quantityOf(a), amountSek: 0 });
-          warn(
-            'Crypto that left without a traceable destination',
-            `${a.accountName}: ${a.assetSymbol} left on ${day(a.date)} and arrived in no tracked ` +
-              `account. Removed from the holding, not counted as a sale - check whether it was one.`,
-          );
-          break;
-        }
-        case 'SPLIT': {
-          const ratio = amountOf(a);
-          if (ratio > 0) cryptoEvents.push({ ...base, kind: 'SPLIT', quantity: ratio, amountSek: 0 });
-          break;
-        }
-      }
-    }
+    const crypto = buildCryptoEvents(
+      data.activities.filter((a) => cryptoIds.has(a.accountId)),
+      {
+        toSek,
+        landsInCrypto: (a) => landsIn(a) === 'CRYPTO',
+        rebookedWith,
+      },
+    );
+    const cryptoEvents = crypto.events;
+    const cryptoRewardRows = crypto.rewards.filter((r) => r.date.slice(0, 4) === String(year));
+    const cryptoRewardsSek = cryptoRewardRows.reduce((sum, r) => sum + r.sek, 0);
+    warnings.push(...crypto.warnings);
 
     if (cryptoRewardsSek > 0) {
       warn(
@@ -778,6 +290,23 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
           `untaxed at receipt with omkostnadsbelopp 0 - adjust those by hand.`,
       );
     }
+
+    // The individual payments behind the dividend and interest totals. Same
+    // filter as the sums below, so the table and the figure cannot disagree.
+    const incomeRows: IncomeRow[] = inYear
+      .filter(
+        (a) =>
+          depaIds.has(a.accountId) &&
+          (a.activityType === 'DIVIDEND' || a.activityType === 'INTEREST'),
+      )
+      .map((a) => ({
+        date: day(a.date),
+        symbol: a.assetSymbol,
+        name: a.assetName,
+        account: a.accountName,
+        amountSek: toSek(a),
+        kind: a.activityType === 'DIVIDEND' ? 'Dividend' : 'Interest',
+      }));
 
     const sumInYear = (predicate: (a: ActivityDetails) => boolean) =>
       inYear.filter(predicate).reduce((sum, a) => sum + toSek(a), 0);
@@ -849,8 +378,10 @@ export function useTaxYear(data: TaxData | undefined, year: number): TaxYearView
       ),
       depaFeesSek: sumInYear((a) => depaIds.has(a.accountId) && a.activityType === 'FEE'),
       fundHoldings,
+      incomeRows,
       cryptoEvents,
       cryptoRewardsSek,
+      cryptoRewardRows,
     });
 
     const seen = new Set<string>();

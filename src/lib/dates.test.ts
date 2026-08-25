@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { day } from './use-tax-year';
+import { day } from './dates';
 
 describe('day', () => {
   it('formats a Date the way the host API parses dates', () => {

@@ -574,3 +574,53 @@ describe('crypto (K4 avsnitt D)', () => {
     expect(summarizeK4(rows)[0]).toMatchObject({ forsaljningspris: 200, vinst: 0, forlust: 0 });
   });
 });
+
+describe('income rows', () => {
+  const payment = (date: string, kind: string, amountSek: number) => ({
+    date,
+    symbol: 'AAA',
+    account: 'Broker',
+    kind,
+    amountSek,
+  });
+
+  it('lists dividends and interest newest first, without touching the totals', () => {
+    const result = computeTaxYear({
+      ...emptyYear(2026),
+      dividendsSek: 300,
+      interestSek: 50,
+      incomeRows: [
+        payment('2026-01-10', 'Dividend', 100),
+        payment('2026-09-02', 'Dividend', 200),
+        payment('2026-05-05', 'Interest', 50),
+      ],
+    });
+
+    expect(result.depa.incomeRows.map((r) => r.date)).toEqual([
+      '2026-09-02',
+      '2026-05-05',
+      '2026-01-10',
+    ]);
+    // The rows are for display; the taxable figure still comes from the sums.
+    expect(result.depa.dividends).toBe(300);
+    expect(result.depa.interest).toBe(50);
+    expect(result.kapitalOverskott).toBeCloseTo(350, 6);
+  });
+
+  it('lists crypto rewards the same way', () => {
+    const result = computeTaxYear({
+      ...emptyYear(2026),
+      cryptoRewardsSek: 90,
+      cryptoRewardRows: [payment('2026-03-01', 'Reward', 40), payment('2026-08-01', 'Reward', 50)],
+    });
+
+    expect(result.crypto.rewardRows.map((r) => r.date)).toEqual(['2026-08-01', '2026-03-01']);
+    expect(result.crypto.rewards).toBe(90);
+  });
+
+  it('is an empty list rather than undefined when nothing was paid', () => {
+    const result = computeTaxYear(emptyYear(2026));
+    expect(result.depa.incomeRows).toEqual([]);
+    expect(result.crypto.rewardRows).toEqual([]);
+  });
+});

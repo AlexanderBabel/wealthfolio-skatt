@@ -224,6 +224,24 @@ export function detailK4(rows: K4Row[]): K4Summary[] {
   });
 }
 
+/**
+ * A single payment that is capital income in its own right rather than the
+ * result of a disposal: a dividend, an interest credit, a staking reward.
+ * Carried alongside the totals purely so the page can show the working.
+ */
+export interface IncomeRow {
+  /** YYYY-MM-DD */
+  date: string;
+  symbol?: string;
+  name?: string;
+  account: string;
+  /** Units received, where that means anything - a reward has some, a dividend does not. */
+  quantity?: number;
+  amountSek: number;
+  /** e.g. "Dividend", "Interest". Shown as-is. */
+  kind?: string;
+}
+
 export interface TaxYearInput {
   year: number;
   isk: IskAccount[];
@@ -231,6 +249,8 @@ export interface TaxYearInput {
   events: SecurityEvent[];
   dividendsSek: number;
   interestSek: number;
+  /** The payments behind dividendsSek and interestSek, for display only. */
+  incomeRows?: IncomeRow[];
   /** Withholding tax seen on ISK dividends. Informational only. */
   iskWithholdingSek: number;
   /** Depa fees. Forvaltningsutgifter, not deductible since 2016. */
@@ -245,6 +265,8 @@ export interface TaxYearInput {
   cryptoEvents?: SecurityEvent[];
   /** Staking, earn and airdrop rewards received during the year, SEK. */
   cryptoRewardsSek?: number;
+  /** The receipts behind cryptoRewardsSek, for display only. */
+  cryptoRewardRows?: IncomeRow[];
 }
 
 export interface FundHolding {
@@ -296,6 +318,8 @@ export interface TaxYearResult {
     fundHoldingsSek: number;
     /** Sum of fundHoldings[].schablonintakt. */
     fundSchablonintakt: number;
+    /** Dividend and interest payments making up those two totals. */
+    incomeRows: IncomeRow[];
   };
   crypto: {
     /** One row per disposal - Skatteverket asks for crypto that way. */
@@ -310,6 +334,8 @@ export interface TaxYearResult {
     deductibleResult: number;
     /** Rewards booked as capital income in the year they were received. */
     rewards: number;
+    /** The individual receipts making up `rewards`. */
+    rewardRows: IncomeRow[];
   };
   kapitalOverskott: number;
   /** Tax to pay, SEK. Zero when the year is a deficit. */
@@ -606,6 +632,7 @@ export function computeTaxYear(input: TaxYearInput): TaxYearResult {
       fundHoldings,
       fundHoldingsSek,
       fundSchablonintakt,
+      incomeRows: [...(input.incomeRows ?? [])].sort((a, b) => b.date.localeCompare(a.date)),
     },
     crypto: {
       rows: cryptoDisposals.rows,
@@ -613,6 +640,7 @@ export function computeTaxYear(input: TaxYearInput): TaxYearResult {
       losses: cryptoLosses,
       deductibleResult: cryptoDeductible,
       rewards: cryptoRewards,
+      rewardRows: [...(input.cryptoRewardRows ?? [])].sort((a, b) => b.date.localeCompare(a.date)),
     },
     kapitalOverskott,
     tax,
