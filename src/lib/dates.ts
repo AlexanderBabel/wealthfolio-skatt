@@ -23,3 +23,19 @@ export const today = (): string => day(new Date());
 
 /** The calendar year of a date, as a string, for comparing against a tax year. */
 export const yearOf = (date: string): string => date.slice(0, 4);
+
+/**
+ * The last entry dated on or before `date`, from a list sorted ascending by
+ * `dateOf`. Binary search: FX and quote histories run to thousands of days and
+ * are looked up once per activity.
+ */
+export function lastOnOrBefore<T>(sorted: T[], date: string, dateOf: (item: T) => string): T | undefined {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (dateOf(sorted[mid]) <= date) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo > 0 ? sorted[lo - 1] : undefined;
+}

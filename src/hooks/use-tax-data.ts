@@ -5,11 +5,12 @@ import type {
   ActivityDetails,
   AddonContext,
   Asset,
+  ExchangeRate,
   Holding,
   Quote,
 } from '@wealthfolio/addon-sdk';
 import { useEffect } from 'react';
-import { day, today } from '../lib/dates';
+import { day, lastOnOrBefore, today } from '../lib/dates';
 import { loadWrappers, type WrapperMap } from '../lib/storage';
 
 /**
@@ -69,7 +70,7 @@ interface AssetInfo {
   typeKnown: boolean;
   /** Human label for the detected type, e.g. "ETF" or "Mutual Fund". */
   typeLabel?: string;
-  /** Close prices ascending by date, for valuing the holding at 1 January. */
+  /** Close prices ascending by date, for valuing the holding at 1 January. Empty unless a fund. */
   quotes: { date: string; close: number }[];
 }
 
@@ -86,17 +87,43 @@ export interface TaxData {
   years: number[];
 }
 
-
-
 /** Latest valuation on or before `date`, or undefined when the series starts later. */
 export function valuationAt(series: Series | undefined, date: string): AccountValuation | undefined {
-  if (!series) return undefined;
-  let found: AccountValuation | undefined;
-  for (const p of series.points) {
-    if (day(p.valuationDate) > date) break;
-    found = p;
+  return series && lastOnOrBefore(series.points, date, (p) => day(p.valuationDate));
+}
+
+/**
+ * Daily rate history to `base`, keyed by the foreign currency. An exchange
+ * rate's id is the asset its quotes are stored under, so the quote history of
+ * that asset is the daily rate series - what a 2019 trade has to be converted
+ * with, not today's rate.
+ */
+export function buildRates(
+  fetched: { r: ExchangeRate; history: Quote[] }[],
+  base: string,
+): Record<string, RatePoint[]> {
+  const rates: Record<string, RatePoint[]> = {};
+  // Wealthfolio can hold a pair both ways round, EUR->SEK and SEK->EUR. The
+  // direct one is kept: the inverse is stored rounded (0.08801) and turns
+  // into 11.362 against a real 11.296. Inverted pairs go first so a direct
+  // one overwrites them - this used to be whichever request finished last.
+  const ordered = [...fetched].sort(
+    (a, b) => Number(b.r.fromCurrency === base) - Number(a.r.fromCurrency === base),
+  );
+  for (const { r, history } of ordered) {
+    if (r.toCurrency !== base && r.fromCurrency !== base) continue;
+    const foreign = r.toCurrency === base ? r.fromCurrency : r.toCurrency;
+    const invert = r.fromCurrency === base;
+    const points: RatePoint[] = history
+      .filter((q) => q.close > 0)
+      .map((q) => ({ date: day(q.timestamp), rate: invert ? 1 / q.close : q.close }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    // The current rate closes the gap between the last quote and today.
+    if (r.rate > 0) points.push({ date: today(), rate: invert ? 1 / r.rate : r.rate });
+    if (points.length > 0) rates[foreign] = points;
   }
-  return found;
+  return rates;
 }
 
 export interface LoadProgress {
@@ -113,11 +140,18 @@ export function useTaxData(ctx: AddonContext, onProgress?: (progress: LoadProgre
   // itself knows the moment a trade, edit or import changes the portfolio,
   // and tells every addon via this event, so the cache is invalidated then
   // rather than waited out.
+  //
+  // Marked stale only, not re-read on the spot: Wealthfolio runs a market data
+  // sync on every start, and its event lands seconds after this page's first
+  // load - re-reading then blanked the page and doubled the wait. A trade or
+  // import happens on another page, so the re-read comes on returning here.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     ctx.api.events.portfolio
-      .onUpdateComplete(() => queryClient.invalidateQueries({ queryKey: ['skatt', 'data'] }))
+      .onUpdateComplete(() =>
+        queryClient.invalidateQueries({ queryKey: ['skatt', 'data'], refetchType: 'none' }),
+      )
       .then((fn) => {
         if (cancelled) fn();
         else unlisten = fn;
@@ -172,9 +206,8 @@ export function useTaxData(ctx: AddonContext, onProgress?: (progress: LoadProgre
           depaAssetNames.set(a.assetSymbol, a.assetName);
         }
       }
-      // Progress is one tick per network round trip below - not exact (the base
-      // currency, and so the real exchange-rate count, is not known yet), but it
-      // moves in step with the slow part: one call per account and per symbol.
+      // Progress is one tick per network round trip below. Every exchange rate
+      // fires one, so the count is exact even before the base currency is known.
       const totalTicks =
         tracked.length + depaAccountIds.size + depaAssetIds.size + exchangeRates.length;
       let doneTicks = 0;
@@ -183,59 +216,65 @@ export function useTaxData(ctx: AddonContext, onProgress?: (progress: LoadProgre
         report({ fraction: 0.05 + 0.95 * (totalTicks > 0 ? doneTicks / totalTicks : 1), label });
       };
 
-      const series: Record<string, Series> = {};
-      await Promise.all(
+      // Everything below is independent round trips, so it all goes out in one
+      // wave: waiting for the valuations before asking for a single quote made
+      // the load the sum of four phases instead of the slowest one.
+      const seriesP = Promise.all(
         tracked.map(async (account) => {
           // One account without valuations must not blank the whole page - the
           // quarters simply come out unknown, which the year already reports.
+          // Only an ISK's quarter starts are ever read, and a full daily history
+          // runs to megabytes per account. The rest ask for today alone, which
+          // still says what the base currency is when there is no ISK.
+          const from = wrappers[account.id] === 'ISK' ? start : end;
           const points = await ctx.api.portfolio
-            .getHistoricalValuations(account.id, start, end)
+            .getHistoricalValuations(account.id, from, end)
             .catch((error: unknown) => {
               ctx.api.logger.error(`No valuations for ${account.name}: ${String(error)}`);
               return [] as AccountValuation[];
             });
-          series[account.id] = {
-            points: [...points].sort((a, b) => day(a.valuationDate).localeCompare(day(b.valuationDate))),
-            baseCurrency: points[0]?.baseCurrency ?? 'SEK',
-          };
           tick(`Reading valuations for ${account.name}…`);
+          return [
+            account.id,
+            {
+              points: [...points].sort((a, b) => day(a.valuationDate).localeCompare(day(b.valuationDate))),
+              baseCurrency: points[0]?.baseCurrency ?? 'SEK',
+            },
+          ] as const;
         }),
       );
-
-      const base = Object.values(series)[0]?.baseCurrency ?? 'SEK';
 
       // Wealthfolio's own instrument-type taxonomy is only available for
       // currently-held positions, but that covers the common case; a symbol
       // sold out entirely falls back to the market data provider below.
-      const holdingsBySymbol = new Map<string, Holding>();
-      await Promise.all(
+      const holdingsP = Promise.all(
         [...depaAccountIds].map(async (accountId) => {
           const holdings = await ctx.api.portfolio.getHoldings(accountId).catch(() => [] as Holding[]);
-          for (const h of holdings) {
-            if (h.instrument?.symbol && !holdingsBySymbol.has(h.instrument.symbol)) {
-              holdingsBySymbol.set(h.instrument.symbol, h);
-            }
-          }
           tick('Reading fund/ETF classifications…');
+          return holdings;
         }),
-      );
+      ).then((perAccount) => {
+        const bySymbol = new Map<string, Holding>();
+        for (const h of perAccount.flat()) {
+          if (h.instrument?.symbol && !bySymbol.has(h.instrument.symbol)) bySymbol.set(h.instrument.symbol, h);
+        }
+        return bySymbol;
+      });
 
-      const assets: Record<string, AssetInfo> = {};
-      await Promise.all(
+      // Most of the load is price history, and it only prices funds at
+      // 1 January - so a security's type is settled first and only a fund's
+      // history is fetched. Under a burst of requests the server answers each
+      // one slower, so the ones skipped here speed up everything else too.
+      const assetsP = Promise.all(
         [...depaAssetIds].map(async ([symbol, assetId]) => {
-          const holding = holdingsBySymbol.get(symbol);
+          const holding = (await holdingsP).get(symbol);
           const category = holding?.instrument?.classifications?.assetType;
+          const categoryKnown = !!category && category.key !== 'OTHER_UNKNOWN';
           // The fallback only fires for a symbol Wealthfolio never classified -
           // typically one fully sold before now, absent from current holdings.
           const profile: Asset | null = category
             ? null
             : await ctx.api.assets.getProfile(assetId).catch(() => null);
-          const history = await ctx.api.quotes.getHistory(assetId).catch(() => [] as Quote[]);
-
-          const rawCurrency = holding?.instrument?.currency ?? profile?.quoteCcy ?? base;
-          // GBp/GBX quotes are pence, a hundredth of the GBP the FX history is
-          // kept in - the same quirk rateOn corrects for below.
-          const pence = rawCurrency === 'GBp' || rawCurrency === 'GBX';
 
           // The security's own name is checked unconditionally, not just when
           // the two sources above are silent - a data provider that has never
@@ -248,60 +287,71 @@ export function useTaxData(ctx: AddonContext, onProgress?: (progress: LoadProgre
           // real holding - unless it could not classify the asset at all.
           const nameMatch = FUND_NAME_PATTERN.test(depaAssetNames.get(symbol) ?? '');
           const providerMatch = /ETF|FUND/i.test(profile?.instrumentType ?? '');
-          const categoryKnown = !!category && category.key !== 'OTHER_UNKNOWN';
+          const isFund = categoryKnown ? FUND_INSTRUMENT_KEYS.has(category!.key) : providerMatch || nameMatch;
 
-          assets[symbol] = {
-            currency: pence ? 'GBP' : rawCurrency,
-            isFund: categoryKnown ? FUND_INSTRUMENT_KEYS.has(category!.key) : providerMatch || nameMatch,
-            typeKnown: categoryKnown || !!profile?.instrumentType || nameMatch,
-            typeLabel: categoryKnown
-              ? category!.name
-              : providerMatch
-                ? profile!.instrumentType!
-                : nameMatch
-                  ? 'Fund/ETF, by name'
-                  : (profile?.instrumentType ?? undefined),
-            quotes: history
-              .filter((q) => q.close > 0)
-              .map((q) => ({ date: day(q.timestamp), close: pence ? q.close / 100 : q.close }))
-              .sort((a, b) => a.date.localeCompare(b.date)),
-          };
+          const history = isFund
+            ? await ctx.api.quotes.getHistory(assetId).catch(() => [] as Quote[])
+            : [];
           tick(`Pricing ${symbol}…`);
+          return {
+            symbol,
+            rawCurrency: holding?.instrument?.currency ?? profile?.quoteCcy,
+            history,
+            info: {
+              isFund,
+              typeKnown: categoryKnown || !!profile?.instrumentType || nameMatch,
+              typeLabel: categoryKnown
+                ? category!.name
+                : providerMatch
+                  ? profile!.instrumentType!
+                  : nameMatch
+                    ? 'Fund/ETF, by name'
+                    : (profile?.instrumentType ?? undefined),
+            },
+          };
         }),
       );
 
-      // An exchange rate's id is the asset its quotes are stored under, so the
-      // quote history of that asset is the daily rate series. That is what a
-      // 2019 trade has to be converted with - not today's rate.
-      const rates: Record<string, RatePoint[]> = {};
-      await Promise.all(
-        exchangeRates
-          .filter((r) => r.toCurrency === base || r.fromCurrency === base)
-          .map(async (r) => {
-            const foreign = r.toCurrency === base ? r.fromCurrency : r.toCurrency;
-            const invert = r.fromCurrency === base;
-            const history = await ctx.api.quotes.getHistory(r.id).catch(() => [] as Quote[]);
-
-            const points: RatePoint[] = history
-              .filter((q) => q.close > 0)
-              .map((q) => ({ date: day(q.timestamp), rate: invert ? 1 / q.close : q.close }))
-              .sort((a, b) => a.date.localeCompare(b.date));
-
-            // The current rate closes the gap between the last quote and today.
-            if (r.rate > 0) points.push({ date: today(), rate: invert ? 1 / r.rate : r.rate });
-            if (points.length > 0) rates[foreign] = points;
-            tick(`Reading ${foreign} exchange rates…`);
-          }),
+      // Which exchange-rate pairs matter depends on the base currency, not
+      // known until the valuations are in, so every pair is fetched now and
+      // buildRates drops the rest.
+      // ponytail: a pair not touching the base costs one wasted request; filter
+      // up front if Wealthfolio ever keeps many of those.
+      const ratesP = Promise.all(
+        exchangeRates.map(async (r) => {
+          const history = await ctx.api.quotes.getHistory(r.id).catch(() => [] as Quote[]);
+          tick(`Reading ${r.fromCurrency}/${r.toCurrency} exchange rates…`);
+          return { r, history };
+        }),
       );
+
+      const [seriesEntries, fetchedAssets, fetchedRates] = await Promise.all([seriesP, assetsP, ratesP]);
+
+      const series: Record<string, Series> = Object.fromEntries(seriesEntries);
+      const base = seriesEntries[0]?.[1].baseCurrency ?? 'SEK';
+
+      const assets: Record<string, AssetInfo> = {};
+      for (const { symbol, rawCurrency = base, history, info } of fetchedAssets) {
+        // GBp/GBX quotes are pence, a hundredth of the GBP the FX history is
+        // kept in - the same quirk rateOn corrects for.
+        const pence = rawCurrency === 'GBp' || rawCurrency === 'GBX';
+        assets[symbol] = {
+          ...info,
+          currency: pence ? 'GBP' : rawCurrency,
+          quotes: history
+            .filter((q) => q.close > 0)
+            .map((q) => ({ date: day(q.timestamp), close: pence ? q.close / 100 : q.close }))
+            .sort((a, b) => a.date.localeCompare(b.date)),
+        };
+      }
+
+      const rates = buildRates(fetchedRates, base);
 
       const thisYear = new Date().getFullYear();
       const firstYear = Number(firstDate.slice(0, 4));
       const years: number[] = [];
       for (let y = thisYear; y >= firstYear; y--) years.push(y);
 
-      // Some ticks above are skipped (an exchange rate not in the base
-      // currency never fires one), so the count alone will not always reach
-      // 1 - closing it out here keeps the bar from stalling short of done.
       report({ fraction: 1, label: 'Done' });
 
       return {

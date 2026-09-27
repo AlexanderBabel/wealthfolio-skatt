@@ -103,7 +103,7 @@ export function TaxPage({ ctx }: { ctx: AddonContext }) {
             <Button
               variant="outline"
               size="icon"
-              title="Re-read your portfolio — figures are cached for a few minutes otherwise"
+              title="Re-read your portfolio — otherwise figures refresh when Wealthfolio reports a change"
               disabled={isFetching}
               onClick={() => queryClient.invalidateQueries({ queryKey: ['skatt', 'data'] })}
             >
