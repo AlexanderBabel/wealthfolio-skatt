@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-09-27
+
+### Fixed
+- **EUR amounts could be converted at the wrong rate.** When Wealthfolio holds a currency
+  pair both ways round (EUR→SEK and SEK→EUR), both were written to the same series and
+  whichever request finished last won - so the rate could change from one load to the next.
+  The inverse is stored rounded (0.08801 turns into 11.362 against a real 11.296), about
+  0.6 % off. The direct pair now always wins.
+
+### Changed
+- **The page loads about twice as fast.** Everything is requested in one go instead of four
+  rounds one after the other. Full valuation history is only read for ISK accounts, the only
+  ones whose quarter starts are used, and price history only for funds, the only holdings it
+  prices - together roughly a third of the data. Measured on a real instance: the addon's
+  own load went from about 9 s to under 5 s.
+- **No second load right after opening.** Wealthfolio syncs market data on every start and
+  announces it a few seconds after the page has loaded, which used to throw the figures
+  away, blank the page and read everything again. Now it only marks them out of date, and
+  they are re-read the next time the page is opened. The refresh button still re-reads on
+  the spot.
+- Switching tax year is about ten times faster: rate and price lookups use a binary search,
+  and a transfer is only matched against transfers of the same security.
+
 ## [1.2.0] - 2026-08-25
 
 ### Added
